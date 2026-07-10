@@ -19,7 +19,7 @@ pub fn collectFns(
             if (fn_map.contains(f.id)) return error.DuplicatedFn;
 
             try fn_map.put(gpa, f.id, @intCast(fn_table.items.len));
-            try fn_table.append(gpa, .{ .name_id = f.id, .arity = @intCast(f.arity) });
+            try fn_table.append(gpa, .{ .name_id = f.id, .arity = f.arity });
         },
         .root, .scope => |block| {
             for (block) |n| {
@@ -74,7 +74,7 @@ fn do_compile(
             }
             locals.items.len = locals.items.len - count;
             if (count > 0) {
-                try insts.append(gpa, .{ .op = .pop_n, .pld = @intCast(count) });
+                try insts.append(gpa, .{ .op = .pop_n, .pld = count });
             }
         },
         .nil => {
