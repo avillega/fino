@@ -94,6 +94,11 @@ pub const Node = union(Tag) {
     while_begin,
     while_do,
     while_end,
+
+    /// Helper function to extract the type of a specific union field at compile-time
+    pub fn VariantType(comptime tag: Tag) type {
+        return @FieldType(@This(), @tagName(tag));
+    }
 };
 
 const Error = error{
@@ -132,18 +137,18 @@ fn advanceTokens(self: *Parser) void {
 }
 
 fn parseDecl(self: *Parser, gpa: Allocator) Error!void {
-    while (self.curr.tag == .endl or self.curr.tag == .semi) {
+    while (self.curr.tag == .sep) {
         self.advanceTokens();
     }
     if (self.curr.tag == .eof) return;
     switch (self.curr.tag) {
         .kw_var => {
             self.advanceTokens(); // eat the kw_var
-            const global = try self.parseIdentifier();
+            const id = try self.parseIdentifier();
             _ = try self.expectToken(.eql);
             try self.parseExpr(gpa, 0);
             try self.expectEndStmt();
-            try self.addNode(gpa, .{ .dec_var = global });
+            try self.addNode(gpa, .{ .dec_var = id });
         },
         .kw_fn => {
             self.advanceTokens(); // eat kw_fn
@@ -192,10 +197,7 @@ fn parseStmt(self: *Parser, gpa: Allocator) Error!void {
         .identifier => {
             // handle setting to an already declared variable
             if (self.peek.tag == .eql) {
-                const ident = self.curr.lexeme(self.src);
-                const id = try self.interner.intern_s(ident);
-
-                self.advanceTokens(); // eat the ident
+                const id = try self.parseIdentifier();
                 self.advanceTokens(); // eat the eql
 
                 try self.parseExpr(gpa, 0);
@@ -214,13 +216,12 @@ fn parseStmt(self: *Parser, gpa: Allocator) Error!void {
         },
         .kw_return => {
             self.advanceTokens(); // eat the kw_return
-            if (self.curr.tag == .semi or self.curr.tag == .endl) {
-                self.advanceTokens(); // eat the separator
+            if (self.curr.tag == .sep or self.curr.tag == .cbrace) {
                 try self.addNode(gpa, .nil);
             } else {
                 try self.parseExpr(gpa, 0);
-                try self.expectEndStmt();
             }
+            try self.expectEndStmt();
             try self.addNode(gpa, .return_stmt);
         },
         .kw_if => {
@@ -267,7 +268,7 @@ fn parseBlock(self: *Parser, gpa: Allocator) Error!void {
     try self.addNode(gpa, .scope_begin);
     var decl_count: u32 = 0;
     while (true) {
-        while (self.curr.tag == .endl or self.curr.tag == .semi) self.advanceTokens();
+        while (self.curr.tag == .sep) self.advanceTokens();
         if (self.curr.tag == .cbrace or self.curr.tag == .eof) break;
         try self.parseDecl(gpa);
         decl_count += 1;
@@ -316,12 +317,9 @@ fn parseFactor(self: *Parser, gpa: Allocator) Error!void {
             self.advanceTokens();
         },
         .identifier => {
-            const ident = self.curr.lexeme(self.src);
-            const id = try self.interner.intern_s(ident);
-            self.advanceTokens();
-
+            const id = try self.parseIdentifier();
             if (self.curr.tag == .oparen) {
-                // handle the call
+                // handle as a call
                 self.advanceTokens(); // eat the paren
                 var arg_c: u8 = 0;
                 while (self.curr.tag != .cparen) {
@@ -334,7 +332,7 @@ fn parseFactor(self: *Parser, gpa: Allocator) Error!void {
                 _ = try self.expectToken(.cparen);
                 try self.addNode(gpa, .{ .call_expr = .{ .id = id, .arg_c = arg_c } });
             } else {
-                // if it is not a call it might just be getting the variable
+                // it is not a call just get the var
                 try self.addNode(gpa, .{ .get_var = id });
             }
         },
@@ -345,12 +343,12 @@ fn parseFactor(self: *Parser, gpa: Allocator) Error!void {
         },
         .bang => {
             self.advanceTokens();
-            try self.parseExpr(gpa, 0);
+            try self.parseFactor(gpa);
             try self.addNode(gpa, .not_expr);
         },
         .minus => {
             self.advanceTokens();
-            try self.parseExpr(gpa, 0);
+            try self.parseFactor(gpa);
             try self.addNode(gpa, .neg_expr);
         },
         else => {
@@ -394,16 +392,16 @@ fn expectEndStmt(self: *Parser) !void {
     const t = self.curr;
     self.advanceTokens();
     switch (t.tag) {
-        .endl, .semi, .eof => {},
+        .sep, .eof => {},
         else => {
-            std.debug.print("expected .endl, .semi, .eof, got {any}", .{t});
+            std.debug.print("expected .sep or .eof, got {any}", .{t});
             self.err = "Unfinished statement";
             return error.UnfinishedStmt;
         },
     }
 }
 
-/// check that the current token is of the expected tag
+/// check that the current token is of the expected tag and eats the token
 fn expectToken(self: *Parser, expected: Token.Tag) Error!Token {
     const t = self.curr;
     self.advanceTokens();
@@ -414,7 +412,6 @@ fn expectToken(self: *Parser, expected: Token.Tag) Error!Token {
 }
 
 fn precedence(tok: Token) u16 {
-    // encodes the precedence table
     return switch (tok.tag) {
         .eql_eql, .bang_eql, .lt_eql, .gt_eql, .gt, .lt => 40,
         .plus, .minus => 45,

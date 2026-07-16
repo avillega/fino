@@ -25,8 +25,7 @@ pub const Token = struct {
         mod,
         lt,
         gt,
-        endl,
-        semi,
+        sep,
         integer,
 
         eql_eql,
@@ -100,8 +99,8 @@ pub fn next(self: *Lexer) Token {
                     start += 1;
                     continue :sw .start;
                 },
-                '\n' => {
-                    tag = .endl;
+                '\n', ';' => {
+                    tag = .sep;
                 },
                 '{' => {
                     tag = .obrace;
@@ -114,9 +113,6 @@ pub fn next(self: *Lexer) Token {
                 },
                 ')' => {
                     tag = .cparen;
-                },
-                ';' => {
-                    tag = .semi;
                 },
                 ',' => {
                     tag = .comma;
@@ -169,35 +165,19 @@ pub fn next(self: *Lexer) Token {
             return .{ .tag = tag, .start = start, .end = self.curr };
         },
         .eql => {
-            var tag: Token.Tag = .eql;
-            if (self.src[self.curr] == '=') {
-                tag = .eql_eql;
-                self.curr += 1;
-            }
+            const tag: Token.Tag = if (self.matchCurr('=')) .eql_eql else .eql;
             return .{ .tag = tag, .start = start, .end = self.curr };
         },
         .lt => {
-            var tag: Token.Tag = .lt;
-            if (self.src[self.curr] == '=') {
-                tag = .lt_eql;
-                self.curr += 1;
-            }
+            const tag: Token.Tag = if (self.matchCurr('=')) .lt_eql else .lt;
             return .{ .tag = tag, .start = start, .end = self.curr };
         },
         .gt => {
-            var tag: Token.Tag = .gt;
-            if (self.src[self.curr] == '=') {
-                tag = .gt_eql;
-                self.curr += 1;
-            }
+            const tag: Token.Tag = if (self.matchCurr('=')) .gt_eql else .gt;
             return .{ .tag = tag, .start = start, .end = self.curr };
         },
         .bang => {
-            var tag: Token.Tag = .bang;
-            if (self.src[self.curr] == '=') {
-                tag = .bang_eql;
-                self.curr += 1;
-            }
+            const tag: Token.Tag = if (self.matchCurr('=')) .bang_eql else .bang;
             return .{ .tag = tag, .start = start, .end = self.curr };
         },
         .ident => {
@@ -225,11 +205,19 @@ pub fn next(self: *Lexer) Token {
     }
 }
 
+fn matchCurr(self: *Lexer, b: u8) bool {
+    if (self.src[self.curr] == b) {
+        self.curr += 1;
+        return true;
+    }
+    return false;
+}
+
 pub fn printTokens(w: *Io.Writer, lexer: *Lexer) !void {
     while (true) {
         const t = lexer.next();
         switch (t.tag) {
-            .endl => try w.writeAll("endl \"\\n\"\n"),
+            .sep => try w.print("sep \"{c}\"\n", .{lexer.src[t.start]}),
             else => try w.print("{t} \"{s}\"\n", .{ t.tag, t.lexeme(lexer.src) }),
         }
         if (t.tag == .eof) break;
@@ -272,10 +260,10 @@ test "fn lexing" {
     try expectToken(src, lex.next(), .identifier, "y");
     try t.expectEqual(.cparen, lex.next().tag);
     try t.expectEqual(.obrace, lex.next().tag);
-    try t.expectEqual(.endl, lex.next().tag);
+    try t.expectEqual(.sep, lex.next().tag);
     try t.expectEqual(.kw_return, lex.next().tag);
     try expectToken(src, lex.next(), .identifier, "x");
-    try t.expectEqual(.endl, lex.next().tag);
+    try t.expectEqual(.sep, lex.next().tag);
     try t.expectEqual(.cbrace, lex.next().tag);
     try t.expectEqual(.eof, lex.next().tag);
 }
@@ -379,7 +367,7 @@ test "two char operators" {
     try expectToken(src, lex.next(), .identifier, "c");
     try expectToken(src, lex.next(), .gt_eql, ">=");
     try expectToken(src, lex.next(), .identifier, "d");
-    try expectToken(src, lex.next(), .semi, ";");
+    try expectToken(src, lex.next(), .sep, ";");
     try expectToken(src, lex.next(), .kw_var, "var");
     try expectToken(src, lex.next(), .identifier, "x");
     try expectToken(src, lex.next(), .eql, "=");

@@ -3,8 +3,13 @@ const Allocator = std.mem.Allocator;
 const Parser = @import("Parser.zig");
 const Vm = @import("../Vm.zig");
 
+const CompilerError = error{
+    DuplicatedFn,
+    FnNotDefined,
+    WrongNumberOfArgs,
+} || Allocator.Error;
+
 const Local = struct {
-    depth: u16,
     id: u24,
 };
 
@@ -27,188 +32,235 @@ pub fn collectFns(
     }
 }
 
+const Context = struct {
+    i: usize,
+    frame: ?usize,
+    locals: std.ArrayList(Local),
+
+    pub fn deinit(c: *Context, gpa: Allocator) void {
+        c.locals.deinit(gpa);
+    }
+};
+
 pub fn compile(
     gpa: Allocator,
     ast: Parser.Ast,
     insts: *std.ArrayList(Vm.Inst),
     fn_map: *std.AutoHashMapUnmanaged(u24, u24),
     fn_table: []Vm.FnInfo,
-) !usize {
-    var locals: std.ArrayList(Local) = .empty;
-    defer locals.deinit(gpa);
-
-    var frames: std.ArrayList(usize) = .empty;
-    try frames.append(gpa, 0);
-    defer frames.deinit(gpa);
-
+) CompilerError!usize {
+    var ctx: Context = .{
+        .i = 0,
+        .frame = null,
+        .locals = .empty,
+    };
+    defer ctx.deinit(gpa);
     const start = insts.items.len;
+    try compileBody(&ctx, gpa, ast, insts, fn_map, fn_table);
+    try emit(gpa, insts, .halt);
+    return start;
+}
 
-    var depth: u16 = 0;
-    var patch_sites: std.ArrayList(u24) = .empty;
-    var loop_tops: std.ArrayList(u24) = .empty;
-    defer patch_sites.deinit(gpa);
-    defer loop_tops.deinit(gpa);
-
-    for (ast) |node| {
+fn compileBody(
+    ctx: *Context,
+    gpa: Allocator,
+    ast: Parser.Ast,
+    insts: *std.ArrayList(Vm.Inst),
+    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
+    fn_table: []Vm.FnInfo,
+) CompilerError!void {
+    while (ctx.i < ast.len) {
+        const node = ast[ctx.i];
+        ctx.i += 1;
         switch (node) {
-            .neg_expr => try insts.append(gpa, .{ .op = .neg }),
-            .not_expr => try insts.append(gpa, .{ .op = .not }),
-            .add_expr => try insts.append(gpa, .{ .op = .add }),
-            .sub_expr => try insts.append(gpa, .{ .op = .sub }),
-            .mul_expr => try insts.append(gpa, .{ .op = .mul }),
-            .div_expr => try insts.append(gpa, .{ .op = .div }),
-            .eql_expr => try insts.append(gpa, .{ .op = .eql }),
+            .scope_end, .fn_end, .while_end, .while_do, .if_else, .if_end => {
+                ctx.i -= 1; // will be checked by the caller
+            },
+            .neg_expr => try emit(gpa, insts, .neg),
+            .not_expr => try emit(gpa, insts, .not),
+            .add_expr => try emit(gpa, insts, .add),
+            .sub_expr => try emit(gpa, insts, .sub),
+            .mul_expr => try emit(gpa, insts, .mul),
+            .div_expr => try emit(gpa, insts, .div),
+            .eql_expr => try emit(gpa, insts, .eql),
             .not_eql_expr => {
-                try insts.append(gpa, .{ .op = .eql });
-                try insts.append(gpa, .{ .op = .not });
+                try emit(gpa, insts, .eql);
+                try emit(gpa, insts, .not);
             },
-            .lt_expr => try insts.append(gpa, .{ .op = .lt }),
+            .lt_expr => try emit(gpa, insts, .lt),
             .lt_eql_expr => {
-                try insts.append(gpa, .{ .op = .gt });
-                try insts.append(gpa, .{ .op = .not });
+                try emit(gpa, insts, .gt);
+                try emit(gpa, insts, .not);
             },
-            .gt_expr => try insts.append(gpa, .{ .op = .gt }),
+            .gt_expr => try emit(gpa, insts, .gt),
             .gt_eql_expr => {
-                try insts.append(gpa, .{ .op = .lt });
-                try insts.append(gpa, .{ .op = .not });
+                try emit(gpa, insts, .lt);
+                try emit(gpa, insts, .not);
             },
-            .nil => {
-                try insts.append(gpa, .{ .op = .nil });
-            },
+            .nil => try emit(gpa, insts, .nil),
             .const_int => |id| {
-                try insts.append(gpa, .{ .op = .const_int, .pld = id });
+                try emitPld(gpa, insts, .const_int, id);
             },
             .call_expr => |call| {
                 const f_idx = fn_map.get(call.id) orelse return error.FnNotDefined;
                 const f_info = fn_table[f_idx];
                 if (f_info.arity != call.arg_c) return error.WrongNumberOfArgs;
-                try insts.append(gpa, .{ .op = .call, .pld = f_idx });
+                try emitPld(gpa, insts, .call, f_idx);
             },
             .print_stmt => {
-                try insts.append(gpa, .{ .op = .print });
+                try emit(gpa, insts, .print);
             },
             .return_stmt => {
-                try insts.append(gpa, .{ .op = .ret });
+                try emit(gpa, insts, .ret);
             },
             .expr_stmt => {
-                try insts.append(gpa, .{ .op = .pop });
-            },
-            .scope_begin => {
-                depth += 1;
+                try emit(gpa, insts, .pop);
             },
             .dec_param => |id| {
-                try locals.append(gpa, .{ .id = id, .depth = depth });
+                try ctx.locals.append(gpa, .{ .id = id });
             },
             .dec_var => |id| {
-                if (depth == 0) {
-                    try insts.append(gpa, .{ .op = .dec_glob, .pld = id });
+                if (ctx.frame == null) {
+                    try emitPld(gpa, insts, .dec_glob, id);
                 } else {
-                    try locals.append(gpa, .{ .id = id, .depth = depth });
+                    try ctx.locals.append(gpa, .{ .id = id });
                 }
             },
             .get_var => |id| {
-                if (depth == 0) {
-                    try insts.append(gpa, .{ .op = .get_glob, .pld = id });
-                    continue;
-                }
-
-                const fb = frames.items[frames.items.len - 1];
-                var i = locals.items.len;
-
-                loop: while (i > fb) : (i -= 1) {
-                    const idx = locals.items.len - i;
-                    if (id == locals.items[idx].id) {
-                        try insts.append(gpa, .{ .op = .get_locl, .pld = @intCast(idx - fb) });
-                        break :loop;
-                    }
+                if (findVarIdx(ctx, id)) |idx| {
+                    try emitPld(gpa, insts, .get_locl, @intCast(idx));
                 } else {
-                    try insts.append(gpa, .{ .op = .get_glob, .pld = id });
+                    try emitPld(gpa, insts, .get_glob, id);
                 }
             },
             .set_var => |id| {
-                if (depth == 0) {
-                    try insts.append(gpa, .{ .op = .set_glob, .pld = id });
-                    continue;
-                }
-
-                const fb = frames.items[frames.items.len - 1];
-                var i = locals.items.len - 1;
-
-                loop: while (i >= fb) : (i -= 1) {
-                    if (id == locals.items[i].id) {
-                        try insts.append(gpa, .{ .op = .set_locl, .pld = @intCast(i - fb) });
-                        break :loop;
-                    }
+                if (findVarIdx(ctx, id)) |idx| {
+                    try emitPld(gpa, insts, .set_locl, @intCast(idx));
                 } else {
-                    try insts.append(gpa, .{ .op = .set_glob, .pld = id });
+                    try emitPld(gpa, insts, .set_glob, id);
                 }
             },
-            .scope_end => {
-                var count: u24 = 0;
-                loop: for (0..locals.items.len) |i| {
-                    const idx = locals.items.len - 1 - i;
-                    if (depth != locals.items[idx].depth) {
-                        break :loop;
-                    }
-                    count += 1;
-                }
-                locals.items.len = locals.items.len - count;
-                if (count > 0) {
-                    try insts.append(gpa, .{ .op = .pop_n, .pld = @intCast(count) });
-                }
-                depth -= 1;
-            },
-            .fn_begin => |f| {
-                const idx = fn_map.get(f.id) orelse return error.FnDoesNotExists;
-
-                depth += 1;
-                try frames.append(gpa, locals.items.len);
-
-                try patch_sites.append(gpa, @intCast(insts.items.len));
-                try insts.append(gpa, .{ .op = .jmp, .pld = 0 });
-                fn_table[idx].entry_point = insts.items.len;
-            },
-            .fn_end => {
-                const frame_start = frames.pop().?;
-                depth -= 1;
-                locals.items.len = frame_start;
-
-                try insts.append(gpa, .{ .op = .nil });
-                try insts.append(gpa, .{ .op = .ret });
-                const patch_site = patch_sites.pop().?;
-                insts.items[patch_site].pld = @intCast(insts.items.len);
-            },
-            .if_then => {
-                try patch_sites.append(gpa, @intCast(insts.items.len));
-                try insts.append(gpa, .{ .op = .jze }); // must be patched
-            },
-            .if_else => {
-                const patch_site = patch_sites.pop().?;
-
-                try patch_sites.append(gpa, @intCast(insts.items.len)); // append a jmp after the then branch is executed to skip the else branch
-                try insts.append(gpa, .{ .op = .jmp }); // must be patched
-
-                insts.items[patch_site].pld = @intCast(insts.items.len); // patch the jze from the if_then
-            },
-            .if_end => {
-                const patch_site = patch_sites.pop().?;
-                insts.items[patch_site].pld = @intCast(insts.items.len); // patch either the jze from the if_then or the jmp from if_else at the end of the then branch
-            },
-            .while_begin => {
-                try loop_tops.append(gpa, @intCast(insts.items.len));
-            },
-            .while_do => {
-                try patch_sites.append(gpa, @intCast(insts.items.len));
-                try insts.append(gpa, .{ .op = .jze }); // must be patched
-            },
-            .while_end => {
-                try insts.append(gpa, .{ .op = .jmp, .pld = loop_tops.pop().? }); // must be patched
-                const patch_site = patch_sites.pop().?;
-                insts.items[patch_site].pld = @intCast(insts.items.len); // patch either the jze from the if_then or the jmp from if_else at the end of the then branch
-            },
+            .scope_begin => try compileScope(ctx, gpa, ast, insts, fn_map, fn_table),
+            .fn_begin => |f| try compileFn(ctx, gpa, f, ast, insts, fn_map, fn_table),
+            .if_then => try compileIf(ctx, gpa, ast, insts, fn_map, fn_table),
+            .while_begin => try compileWhile(ctx, gpa, ast, insts, fn_map, fn_table),
             // else => |n| std.debug.panic("nyi: {t}", .{n}),
         }
     }
-    try insts.append(gpa, .{ .op = .halt });
-    return start;
+}
+
+fn compileFn(
+    ctx: *Context,
+    gpa: Allocator,
+    f: Parser.Node.VariantType(.fn_begin),
+    ast: Parser.Ast,
+    insts: *std.ArrayList(Vm.Inst),
+    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
+    fn_table: []Vm.FnInfo,
+) CompilerError!void {
+    const idx = fn_map.get(f.id) orelse return error.FnNotDefined;
+    const patch = insts.items.len;
+    try emit(gpa, insts, .jmp);
+    fn_table[idx].entry_point = insts.items.len;
+    const curr_frame = ctx.frame;
+    ctx.frame = ctx.locals.items.len;
+    defer ctx.frame = curr_frame;
+    defer ctx.locals.items.len = ctx.frame.?;
+
+    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table);
+    std.debug.assert(ast[ctx.i] == .fn_end);
+    ctx.i += 1;
+
+    try emit(gpa, insts, .nil);
+    try emit(gpa, insts, .ret);
+    insts.items[patch].pld = @intCast(insts.items.len);
+}
+
+fn compileScope(
+    ctx: *Context,
+    gpa: Allocator,
+    ast: Parser.Ast,
+    insts: *std.ArrayList(Vm.Inst),
+    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
+    fn_table: []Vm.FnInfo,
+) CompilerError!void {
+    const locals_start = ctx.locals.items.len;
+    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table);
+    const count = ctx.locals.items.len - locals_start;
+    if (count > 0) try emitPld(gpa, insts, .pop_n, @intCast(count));
+}
+
+fn findVarIdx(ctx: *Context, id: u24) ?usize {
+    const frame_start: usize = ctx.frame orelse 0;
+    const frame = ctx.locals.items[frame_start..];
+    var idx = frame.len;
+    var f_it = std.mem.reverseIterator(frame);
+    while (f_it.next()) |local| {
+        idx -= 1;
+        if (id == local.id) {
+            return idx;
+        }
+    }
+    return null;
+}
+
+fn compileIf(
+    ctx: *Context,
+    gpa: Allocator,
+    ast: Parser.Ast,
+    insts: *std.ArrayList(Vm.Inst),
+    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
+    fn_table: []Vm.FnInfo,
+) CompilerError!void {
+    // cond is already compiled at this point
+    const patch_jze = insts.items.len;
+    try emit(gpa, insts, .jze); // must be patched
+    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table);
+    switch (ast[ctx.i]) {
+        .if_end => {
+            ctx.i += 1; // eat .if_end
+            insts.items[patch_jze].pld = @intCast(insts.items.len); // patch jze
+        },
+        .if_else => {
+            ctx.i += 1; // eat .if_else
+            const patch_jmp = insts.items.len;
+            try emit(gpa, insts, .jmp);
+            insts.items[patch_jze].pld = @intCast(insts.items.len); // patch jze
+
+            try compileBody(ctx, gpa, ast, insts, fn_map, fn_table);
+            insts.items[patch_jmp].pld = @intCast(insts.items.len); // patch jmp
+            std.debug.assert(ast[ctx.i] == .if_end);
+            ctx.i += 1;
+        },
+        else => unreachable,
+    }
+}
+
+fn compileWhile(
+    ctx: *Context,
+    gpa: Allocator,
+    ast: Parser.Ast,
+    insts: *std.ArrayList(Vm.Inst),
+    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
+    fn_table: []Vm.FnInfo,
+) CompilerError!void {
+    const loop_top = insts.items.len;
+    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table); // compiles the condition
+    std.debug.assert(ast[ctx.i] == .while_do);
+    ctx.i += 1;
+    const patch_jze = insts.items.len;
+    try emit(gpa, insts, .jze);
+    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table); // compiles the body of the while
+    std.debug.assert(ast[ctx.i] == .while_end);
+    ctx.i += 1;
+    try emitPld(gpa, insts, .jmp, @intCast(loop_top));
+    insts.items[patch_jze].pld = @intCast(insts.items.len);
+}
+
+fn emit(gpa: Allocator, insts: *std.ArrayList(Vm.Inst), comptime op: Vm.Inst.Op) !void {
+    try emitPld(gpa, insts, op, 0);
+}
+
+fn emitPld(gpa: Allocator, insts: *std.ArrayList(Vm.Inst), comptime op: Vm.Inst.Op, pld: u24) !void {
+    try insts.append(gpa, .{ .op = op, .pld = pld });
 }
