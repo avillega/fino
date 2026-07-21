@@ -35,10 +35,31 @@ const StrObj = struct {
     }
 };
 
+const ArrayObj = struct {
+    elems: std.ArrayList(Value),
+
+    pub fn destroy(s: ArrayObj, gpa: Allocator) void {
+        for (s.elems.items) |e| {
+            e.destroy(gpa);
+        }
+        var elems = s.elems;
+        elems.deinit(gpa);
+    }
+
+    pub fn clone(s: ArrayObj, gpa: Allocator) Allocator.Error!ArrayObj {
+        var elems: std.ArrayList(Value) = try .initCapacity(gpa, s.elems.items.len);
+        for (s.elems.items) |e| {
+            elems.appendAssumeCapacity(try e.clone(gpa));
+        }
+        return .{ .elems = elems };
+    }
+};
+
 pub const Value = union(enum) {
     nil,
     int: i64,
     str: StrObj,
+    arr: ArrayObj,
 
     pub fn format(
         v: @This(),
@@ -48,6 +69,16 @@ pub const Value = union(enum) {
             .nil => try w.writeAll("nil"),
             .int => |i| try w.print("{d}", .{i}),
             .str => |s| try w.writeAll(s.buffer),
+            .arr => |a| {
+                try w.writeByte('[');
+                var cnt: u32 = 0;
+                for (a.elems.items) |e| {
+                    if (cnt > 0) try w.writeAll(", ");
+                    cnt += 1;
+                    try w.print("{f}", .{e});
+                }
+                try w.writeByte(']');
+            },
         }
     }
 
@@ -65,14 +96,20 @@ pub const Value = union(enum) {
             .str => |s| {
                 gpa.free(s.buffer);
             },
+            .arr => |a| {
+                a.destroy(gpa);
+            },
         }
     }
 
-    pub fn clone(v: Value, gpa: Allocator) !Value {
+    pub fn clone(v: Value, gpa: Allocator) Allocator.Error!Value {
         switch (v) {
             .nil, .int => return v,
             .str => |s| {
                 return .{ .str = try StrObj.dupe(gpa, s.buffer) };
+            },
+            .arr => |a| {
+                return .{ .arr = try a.clone(gpa) };
             },
         }
     }
@@ -88,6 +125,7 @@ pub const Inst = packed struct(u32) {
         nil,
         const_int,
         str_lit,
+        arr_lit,
         pop,
         pop_n,
         neg,
@@ -124,6 +162,7 @@ pub const Inst = packed struct(u32) {
         switch (i.op) {
             .const_int,
             .str_lit,
+            .arr_lit,
             .pop_n,
             .dec_glob,
             .set_glob,
@@ -171,7 +210,7 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
 
     var stack: std.ArrayList(Value) = .empty;
     defer {
-        for (stack.items) |v| {
+        for (stack.items) |*v| {
             v.destroy(gpa);
         }
         stack.deinit(gpa);
@@ -203,6 +242,16 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
         .str_lit => {
             const s = interner.strings.items[insts[pc].pld];
             try stack.append(gpa, .{ .str = try .dupe(gpa, s) });
+            continue :loop trace(next(&pc, insts), pc, stack.items);
+        },
+        .arr_lit => {
+            const n = insts[pc].pld;
+            const src_e = stack.items[stack.items.len - n ..];
+            const elems = try gpa.dupe(Value, src_e);
+            stack.shrinkRetainingCapacity(stack.items.len - n);
+
+            const arr = ArrayObj{ .elems = .fromOwnedSlice(elems) };
+            try stack.append(gpa, .{ .arr = arr });
             continue :loop trace(next(&pc, insts), pc, stack.items);
         },
         inline .neg, .not => |op| {
@@ -329,7 +378,6 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
             const f = fns[p.fn_idx];
 
             if (f.arity) |arity| {
-                std.debug.print("===========\nArity {d}|call {d}\n===================", .{ arity, p.arity });
                 if (arity != p.arity) return error.WrongNumbertOfArgs;
             }
             const r = try f.body.native(vm, gpa, args);
@@ -347,8 +395,8 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
 }
 
 inline fn binop(stack: *std.ArrayList(Value), gpa: std.mem.Allocator, comptime op: Inst.Op) !void {
-    const b = stack.pop().?;
-    const a = stack.pop().?;
+    var b = stack.pop().?;
+    var a = stack.pop().?;
     defer a.destroy(gpa);
     defer b.destroy(gpa);
 
@@ -357,6 +405,13 @@ inline fn binop(stack: *std.ArrayList(Value), gpa: std.mem.Allocator, comptime o
             if (a == .str and b == .str) {
                 const s = try std.fmt.allocPrint(gpa, "{s}{s}", .{ a.str.buffer, b.str.buffer });
                 break :sw .{ .str = .own(s) };
+            }
+            if (a == .arr and b == .arr) {
+                try a.arr.elems.appendSlice(gpa, b.arr.elems.items);
+                b.arr.elems.clearRetainingCapacity();
+                const result = a;
+                a = .nil; // take a
+                break :sw result;
             }
             if (a != .int or b != .int) return error.BinaryOperationNotNums;
             break :sw .{ .int = a.int + b.int };

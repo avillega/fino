@@ -148,6 +148,67 @@ test "run: string literals concat" {
     );
     try std.testing.expectEqualStrings("hello\nhelloworld\nhello world\n", w.buffered());
 }
+
+test "run: arrays append" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\var s = [1]
+        \\print(s)
+        \\s = append(s, 2)
+        \\s = append(s, 3)
+        \\print(s)
+    );
+    try std.testing.expectEqualStrings("[1]\n[1, 2, 3]\n", w.buffered());
+}
+
+test "run: arrays concat" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\var s = [1]
+        \\print(s)
+        \\var a = [2, 3]
+        \\print(s, a)
+        \\var x = s + a
+        \\print(s, a, x)
+    );
+    try std.testing.expectEqualStrings("[1]\n[1] [2, 3]\n[1] [2, 3] [1, 2, 3]\n", w.buffered());
+}
+
+test "run: arrays append to new array" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\var s = [1]
+        \\print(s)
+        \\var a = append(s, 2)
+        \\print(s, a)
+    );
+    try std.testing.expectEqualStrings("[1]\n[1] [1, 2]\n", w.buffered());
+}
+
 test "run: program state persists across runs" {
     const gpa = std.testing.allocator;
     var buf: [4096]u8 = undefined;

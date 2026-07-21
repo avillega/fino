@@ -117,6 +117,7 @@ fn writeLabel(w: *Io.Writer, interner: *Interner, n: Parser.Node) !void {
         .if_end => try w.writeAll("if"),
         .while_do => try w.writeAll("cond"),
         .while_end => try w.writeAll("while"),
+        .arr_lit => try w.writeAll("array"),
         else => |node| try w.print("{t}", .{node}),
     }
 }
@@ -156,6 +157,7 @@ inline fn displayArity(n: Parser.Node) u32 {
         .if_end => |a| a,
         .fn_end => |f| f.arity + 1,
         .scope_end => |a| a,
+        .arr_lit => |a| a,
         else => |node| std.debug.panic("unknown arity for {t}", .{node}),
     };
 }

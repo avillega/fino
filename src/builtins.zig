@@ -4,7 +4,7 @@ const Value = Vm.Value;
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
-const NativeError = error{} || Allocator.Error || Writer.Error;
+const NativeError = error{ MustBeArray, TooFewArgs } || Allocator.Error || Writer.Error;
 
 pub const NativeFn = *const fn (vm: *Vm, gpa: Allocator, args: []Value) NativeError!Value;
 
@@ -29,8 +29,23 @@ pub fn len(vm: *Vm, gpa: Allocator, args: []Value) NativeError!Value {
         .int => 0,
         .nil => 0,
         .str => |s| s.buffer.len,
+        .arr => |a| a.elems.items.len,
     };
     return .{ .int = @intCast(l) };
+}
+
+pub fn append(vm: *Vm, gpa: Allocator, args: []Value) NativeError!Value {
+    _ = vm;
+    if (args.len < 2) return error.TooFewArgs;
+    var result = args[0];
+    args[0] = .nil;
+    if (result != .arr) return error.MustBeArray;
+
+    for (args[1..]) |*e| {
+        try result.arr.elems.append(gpa, e.*);
+        e.* = .nil;
+    }
+    return result;
 }
 
 const NativeDef = struct {
@@ -42,4 +57,5 @@ const NativeDef = struct {
 pub const builtins = [_]NativeDef{
     .{ .name = "print", .call = print, .arity = null },
     .{ .name = "len", .call = len, .arity = 1 },
+    .{ .name = "append", .call = append, .arity = null },
 };

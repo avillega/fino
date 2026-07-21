@@ -19,6 +19,7 @@ const Tag = enum(u8) {
     nil,
     const_int,
     str_lit,
+    arr_lit,
     dec_var,
     dec_param,
     set_var,
@@ -59,6 +60,7 @@ pub const Node = union(Tag) {
     nil,
     const_int: u24,
     str_lit: u24,
+    arr_lit: u24, // number of expressions
     dec_var: u24,
     dec_param: u24,
     set_var: u24,
@@ -334,6 +336,9 @@ fn parseFactor(self: *Parser, gpa: Allocator) Error!void {
             const id = try self.internStrLit();
             try self.addNode(gpa, .{ .str_lit = id });
         },
+        .obracket => {
+            try self.parseArray(gpa);
+        },
         .oparen => {
             self.advanceTokens();
             try self.parseExpr(gpa, 0);
@@ -367,6 +372,20 @@ fn internStrLit(self: *Parser) !u24 {
     const str_token = try self.expectToken(.str_lit);
     const lit = str_token.lexeme(self.src);
     return try self.interner.intern_s(lit);
+}
+
+fn parseArray(self: *Parser, gpa: Allocator) !void {
+    _ = try self.expectToken(.obracket);
+    var elem_count: u24 = 0;
+    while (true) {
+        while (self.curr.tag == .sep) self.advanceTokens();
+        if (self.curr.tag == .cbracket or self.curr.tag == .eof) break;
+        if (elem_count > 0) _ = try self.expectToken(.comma);
+        try self.parseExpr(gpa, 0);
+        elem_count += 1;
+    }
+    _ = try self.expectToken(.cbracket);
+    try self.addNode(gpa, .{ .arr_lit = elem_count });
 }
 
 fn addNode(self: *Parser, gpa: Allocator, node: Node) !void {
@@ -718,4 +737,25 @@ test "parse: simple string literal" {
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
     try std.testing.expectEqualStrings("my_string/lit", try interner.get_s(1));
+}
+
+test "parse: simple array literal" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ var a = [x, y ,z, w]
+    ;
+    var parser = Parser.init(src, &interner);
+    const ast = try parser.parse(gpa);
+    defer gpa.free(ast);
+    const expected = [_]Node{
+        .{ .get_var = 1 },
+        .{ .get_var = 2 },
+        .{ .get_var = 3 },
+        .{ .get_var = 4 },
+        .{ .arr_lit = 4 },
+        .{ .dec_var = 0 },
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
 }

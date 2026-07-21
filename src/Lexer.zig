@@ -15,6 +15,8 @@ pub const Token = struct {
         cparen,
         obrace,
         cbrace,
+        obracket,
+        cbracket,
         eql,
         bang,
         comma,
@@ -131,6 +133,12 @@ pub fn next(self: *Lexer) Token {
                 },
                 '%' => {
                     tag = .mod;
+                },
+                '[' => {
+                    tag = .obracket;
+                },
+                ']' => {
+                    tag = .cbracket;
                 },
                 '=' => {
                     self.curr += 1;
@@ -440,6 +448,26 @@ test "lex string literal" {
     try expectToken(src, lex.next(), .identifier, "a");
     try expectToken(src, lex.next(), .eql, "=");
     try expectToken(src, lex.next(), .str_lit, "my_string/lit");
+    try t.expectEqual(.sep, lex.next().tag);
+    try t.expectEqual(.eof, lex.next().tag);
+}
+
+test "lex array literal" {
+    const t = std.testing;
+    const src =
+        \\ a = [x, y , z]
+        \\
+    ;
+    var lex = Lexer.init(src);
+    try expectToken(src, lex.next(), .identifier, "a");
+    try expectToken(src, lex.next(), .eql, "=");
+    try expectToken(src, lex.next(), .obracket, "[");
+    try expectToken(src, lex.next(), .identifier, "x");
+    try expectToken(src, lex.next(), .comma, ",");
+    try expectToken(src, lex.next(), .identifier, "y");
+    try expectToken(src, lex.next(), .comma, ",");
+    try expectToken(src, lex.next(), .identifier, "z");
+    try expectToken(src, lex.next(), .cbracket, "]");
     try t.expectEqual(.sep, lex.next().tag);
     try t.expectEqual(.eof, lex.next().tag);
 }
