@@ -82,6 +82,7 @@ const Compiler = struct {
                 .const_int => |id| try c.emitPld(.const_int, id),
                 .str_lit => |id| try c.emitPld(.str_lit, id),
                 .arr_lit => |elem_cnt| try c.emitPld(.arr_lit, elem_cnt),
+                .get_index => try c.emit(.get_index),
                 .call_expr => |call| {
                     const f_idx = c.prog.fn_map.get(call.id) orelse return error.FnNotDefined;
                     const f_info = c.prog.fn_table.items[f_idx];

@@ -225,3 +225,21 @@ test "run: program state persists across runs" {
     try prog.run(&vm, "print(add(x, 2))");
     try std.testing.expectEqualStrings("42\n", w.buffered());
 }
+
+test "run: array indexing" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\var x = [1, 2, 3]
+        \\print(x[0])
+        \\print(x[1])
+    );
+    try std.testing.expectEqualStrings("1\n2\n", w.buffered());
+}

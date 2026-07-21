@@ -39,6 +39,7 @@ const Tag = enum(u8) {
     call_expr,
     return_stmt,
     expr_stmt,
+    get_index,
 
     // this are markers
     scope_begin,
@@ -80,6 +81,7 @@ pub const Node = union(Tag) {
     call_expr: packed struct(u32) { id: u24, arg_c: u8 },
     return_stmt,
     expr_stmt,
+    get_index,
 
     // this are markers
     scope_begin,
@@ -359,6 +361,14 @@ fn parseFactor(self: *Parser, gpa: Allocator) Error!void {
             std.debug.print("got {t}\n", .{self.curr.tag});
             return error.UnexpectedToken;
         },
+    }
+
+    // parse indexing
+    while (self.curr.tag == .obracket) {
+        self.advanceTokens(); // eat the '['
+        try self.parseExpr(gpa, 0);
+        _ = try self.expectToken(.cbracket);
+        try self.addNode(gpa, .get_index);
     }
 }
 
@@ -756,6 +766,25 @@ test "parse: simple array literal" {
         .{ .get_var = 4 },
         .{ .arr_lit = 4 },
         .{ .dec_var = 0 },
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+
+test "parse: simple array index get" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ a[10]
+    ;
+    var parser = Parser.init(src, &interner);
+    const ast = try parser.parse(gpa);
+    defer gpa.free(ast);
+    const expected = [_]Node{
+        .{ .get_var = 0 },
+        .{ .const_int = 0 },
+        .get_index,
+        .expr_stmt,
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
 }

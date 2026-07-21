@@ -143,6 +143,7 @@ pub const Inst = packed struct(u32) {
         get_glob,
         set_locl,
         get_locl,
+        get_index,
         jmp,
         jmpf,
         jmpt,
@@ -294,6 +295,10 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
             try stack.append(gpa, try v.clone(gpa));
             continue :loop trace(next(&pc, insts), pc, stack.items);
         },
+        .get_index => {
+            try getIdx(&stack, gpa);
+            continue :loop trace(next(&pc, insts), pc, stack.items);
+        },
         .set_locl => {
             const curr = stack.items[frame_base + insts[pc].pld];
             curr.destroy(gpa);
@@ -391,6 +396,28 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
         .halt => {
             break :loop;
         },
+    }
+}
+
+inline fn getIdx(stack: *std.ArrayList(Value), gpa: std.mem.Allocator) !void {
+    const idx = stack.pop().?;
+    const target = stack.pop().?;
+    defer {
+        idx.destroy(gpa);
+        target.destroy(gpa);
+    }
+
+    if (idx != .int) return error.IdxMustBeInt;
+    const i = idx.int;
+    switch (target) {
+        .str => {
+            return error.Nyi; // TODO: support chars/bytes?
+        },
+        .arr => |a| {
+            if (i >= a.elems.items.len) return error.IndexOutOfBounds;
+            try stack.append(gpa, try a.elems.items[@intCast(i)].clone(gpa));
+        },
+        else => return error.TargetMustBeIndexable,
     }
 }
 

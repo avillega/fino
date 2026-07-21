@@ -152,6 +152,7 @@ inline fn displayArity(n: Parser.Node) u32 {
         .lt_expr,
         .gt_expr,
         .while_end,
+        .get_index,
         => 2,
         .call_expr => |c| c.arg_c,
         .if_end => |a| a,
@@ -186,6 +187,8 @@ test "printAstTree: every construct" {
         \\}
         \\{
         \\    print(g)
+        \\    var x = [1, 2, 3]
+        \\    var y = x[1]
         \\}
     ;
 
@@ -253,6 +256,15 @@ test "printAstTree: every construct" {
         \\│ expr_stmt
         \\│ │ call print/1
         \\│ │ │ get_var g
+        \\│ dec_var x
+        \\│ │ array
+        \\│ │ │ const_int 1
+        \\│ │ │ const_int 2
+        \\│ │ │ const_int 3
+        \\│ dec_var y
+        \\│ │ get_index
+        \\│ │ │ get_var x
+        \\│ │ │ const_int 1
         \\
     ;
 
