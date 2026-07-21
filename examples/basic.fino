@@ -4,29 +4,20 @@ fn fib(x) {
 	var b = 1
 
 	while (i < x) {
+		print("fib", i, ":", a)
 		var tmp = a + b
 		a = b
 		b = tmp
 		i = i + 1
 	}
 
+	print("fib", i, ":", a)
 	return a
 }
 
 
-var z = 1
-if (z == 1) {
-	print fib(50)
-} else if (z == 2) {
-	print fib(10)
-} else {
-	print fib(20)
-}
+fib(50)
 
-{
-	var scope = 1
-}
-
-
-
-
+print("number:", len(1))
+print("nil:", len(nil))
+print("string:", len("my_string", 2))

@@ -38,11 +38,11 @@ pub const Token = struct {
         kw_true,
         kw_false,
         kw_var,
-        kw_print,
         kw_nil,
         kw_if,
         kw_else,
         kw_while,
+        str_lit,
         identifier,
         err,
         eof,
@@ -59,7 +59,6 @@ pub fn init(source: [:0]const u8) Lexer {
 
 const keywords: std.StaticStringMap(Token.Tag) = .initComptime(.{
     .{ "fn", .kw_fn },
-    .{ "print", .kw_print },
     .{ "return", .kw_return },
     .{ "true", .kw_true },
     .{ "false", .kw_false },
@@ -83,6 +82,7 @@ pub fn next(self: *Lexer) Token {
         bang,
         ident,
         integ,
+        str,
     };
 
     var start = self.curr;
@@ -148,6 +148,10 @@ pub fn next(self: *Lexer) Token {
                     self.curr += 1;
                     continue :sw .gt;
                 },
+                '"' => {
+                    self.curr += 1;
+                    continue :sw .str;
+                },
                 'a'...'z', 'A'...'Z', '_' => {
                     self.curr += 1;
                     continue :sw .ident;
@@ -201,6 +205,23 @@ pub fn next(self: *Lexer) Token {
                 else => {},
             }
             return .{ .tag = .integer, .start = start, .end = self.curr };
+        },
+        .str => {
+            switch (self.src[self.curr]) {
+                0 => {
+                    return .{ .tag = .err, .start = start, .end = self.curr };
+                },
+                '"' => {
+                    const end = self.curr;
+                    start += 1; // don't put the " in the string
+                    self.curr += 1;
+                    return .{ .tag = .str_lit, .start = start, .end = end };
+                },
+                else => {
+                    self.curr += 1;
+                    continue :sw .str;
+                },
+            }
         },
     }
 }
@@ -296,7 +317,7 @@ test "all keywords" {
 
     try expectToken(src, lex.next(), .kw_fn, "fn");
     try expectToken(src, lex.next(), .kw_return, "return");
-    try expectToken(src, lex.next(), .kw_print, "print");
+    try expectToken(src, lex.next(), .identifier, "print");
     try expectToken(src, lex.next(), .kw_true, "true");
     try expectToken(src, lex.next(), .kw_false, "false");
     try expectToken(src, lex.next(), .kw_var, "var");
@@ -406,5 +427,19 @@ test "lex while" {
     try expectToken(src, lex.next(), .obrace, "{");
     try expectToken(src, lex.next(), .kw_return, "return");
     try expectToken(src, lex.next(), .cbrace, "}");
+    try t.expectEqual(.eof, lex.next().tag);
+}
+
+test "lex string literal" {
+    const t = std.testing;
+    const src =
+        \\ a = "my_string/lit"
+        \\
+    ;
+    var lex = Lexer.init(src);
+    try expectToken(src, lex.next(), .identifier, "a");
+    try expectToken(src, lex.next(), .eql, "=");
+    try expectToken(src, lex.next(), .str_lit, "my_string/lit");
+    try t.expectEqual(.sep, lex.next().tag);
     try t.expectEqual(.eof, lex.next().tag);
 }

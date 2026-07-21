@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Parser = @import("Parser.zig");
+const Program = @import("Program.zig");
 const Vm = @import("../Vm.zig");
 
 const CompilerError = error{
@@ -9,258 +10,219 @@ const CompilerError = error{
     WrongNumberOfArgs,
 } || Allocator.Error;
 
-const Local = struct {
-    id: u24,
-};
+pub fn compile(prog: *Program, ast: Parser.Ast) CompilerError!usize {
+    try collectFns(prog, ast);
+    var c: Compiler = .{
+        .prog = prog,
+        .ast = ast,
+        .i = 0,
+        .frame = null,
+        .locals = .empty,
+    };
+    defer c.locals.deinit(prog.gpa);
 
-pub fn collectFns(
-    gpa: Allocator,
-    ast: Parser.Ast,
-    fn_map: *std.AutoHashMapUnmanaged(u24, u24), // from fn_id to location in the fn table
-    fn_table: *std.ArrayList(Vm.FnInfo),
-) !void {
+    const start = prog.insts.items.len;
+    try c.compileBody();
+    try c.emit(.halt);
+    return start;
+}
+
+fn collectFns(prog: *Program, ast: Parser.Ast) CompilerError!void {
     for (ast) |node| {
         switch (node) {
             .fn_begin => |f| {
-                if (fn_map.contains(f.id)) return error.DuplicatedFn;
+                if (prog.fn_map.contains(f.id)) return error.DuplicatedFn;
 
-                try fn_map.put(gpa, f.id, @intCast(fn_table.items.len));
-                try fn_table.append(gpa, .{ .name_id = f.id, .arity = f.arity });
+                try prog.fn_map.put(prog.gpa, f.id, @intCast(prog.fn_table.items.len));
+                try prog.fn_table.append(prog.gpa, .{ .name_id = f.id, .arity = f.arity });
             },
             else => {},
         }
     }
 }
 
-const Context = struct {
+const Compiler = struct {
+    prog: *Program,
+    ast: Parser.Ast,
     i: usize,
-    frame: ?usize,
-    locals: std.ArrayList(Local),
+    frame: ?usize, // start of the current fn frame in locals; null at top level
+    locals: std.ArrayList(u24),
 
-    pub fn deinit(c: *Context, gpa: Allocator) void {
-        c.locals.deinit(gpa);
+    fn compileBody(c: *Compiler) CompilerError!void {
+        while (c.i < c.ast.len) {
+            const node = c.ast[c.i];
+            c.i += 1;
+            switch (node) {
+                .scope_end, .fn_end, .while_end, .while_do, .if_else, .if_end => {
+                    c.i -= 1; // will be checked by the caller
+                    return;
+                },
+                .neg_expr => try c.emit(.neg),
+                .not_expr => try c.emit(.not),
+                .add_expr => try c.emit(.add),
+                .sub_expr => try c.emit(.sub),
+                .mul_expr => try c.emit(.mul),
+                .div_expr => try c.emit(.div),
+                .eql_expr => try c.emit(.eql),
+                .not_eql_expr => {
+                    try c.emit(.eql);
+                    try c.emit(.not);
+                },
+                .lt_expr => try c.emit(.lt),
+                .lt_eql_expr => {
+                    try c.emit(.gt);
+                    try c.emit(.not);
+                },
+                .gt_expr => try c.emit(.gt),
+                .gt_eql_expr => {
+                    try c.emit(.lt);
+                    try c.emit(.not);
+                },
+                .nil => try c.emit(.nil),
+                .const_int => |id| try c.emitPld(.const_int, id),
+                .str_lit => |id| try c.emitPld(.str_lit, id),
+                .call_expr => |call| {
+                    const f_idx = c.prog.fn_map.get(call.id) orelse return error.FnNotDefined;
+                    const f_info = c.prog.fn_table.items[f_idx];
+                    switch (f_info.body) {
+                        .native => try c.emitPld(
+                            .call_native,
+                            @bitCast(Vm.CallPayload{
+                                .fn_idx = @intCast(f_idx),
+                                .arity = call.arg_c,
+                            }),
+                        ),
+                        .entry => {
+                            if (f_info.arity != call.arg_c) return error.WrongNumberOfArgs;
+                            try c.emitPld(.call, f_idx);
+                        },
+                    }
+                },
+                .return_stmt => {
+                    try c.emit(.ret);
+                },
+                .expr_stmt => {
+                    try c.emit(.pop);
+                },
+                .dec_param => |id| {
+                    try c.locals.append(c.prog.gpa, id);
+                },
+                .dec_var => |id| {
+                    if (c.frame == null) {
+                        try c.emitPld(.dec_glob, id);
+                    } else {
+                        try c.locals.append(c.prog.gpa, id);
+                    }
+                },
+                .get_var => |id| {
+                    if (c.findVarIdx(id)) |idx| {
+                        try c.emitPld(.get_locl, @intCast(idx));
+                    } else {
+                        try c.emitPld(.get_glob, id);
+                    }
+                },
+                .set_var => |id| {
+                    if (c.findVarIdx(id)) |idx| {
+                        try c.emitPld(.set_locl, @intCast(idx));
+                    } else {
+                        try c.emitPld(.set_glob, id);
+                    }
+                },
+                .scope_begin => try c.compileScope(),
+                .fn_begin => |f| try c.compileFn(f),
+                .if_then => try c.compileIf(),
+                .while_begin => try c.compileWhile(),
+            }
+        }
+    }
+
+    fn compileFn(c: *Compiler, f: Parser.Node.VariantType(.fn_begin)) CompilerError!void {
+        const idx = c.prog.fn_map.get(f.id) orelse return error.FnNotDefined;
+        const patch = c.prog.insts.items.len;
+        try c.emit(.jmp);
+        c.prog.fn_table.items[idx].body = .{ .entry = c.prog.insts.items.len };
+
+        const curr_frame = c.frame;
+        c.frame = c.locals.items.len;
+        defer c.frame = curr_frame;
+        defer c.locals.items.len = c.frame.?;
+
+        try c.compileBody();
+        std.debug.assert(c.ast[c.i] == .fn_end);
+        c.i += 1;
+
+        try c.emit(.nil);
+        try c.emit(.ret);
+        c.prog.insts.items[patch].pld = @intCast(c.prog.insts.items.len);
+    }
+
+    fn compileScope(c: *Compiler) CompilerError!void {
+        const locals_start = c.locals.items.len;
+        try c.compileBody();
+        std.debug.assert(c.ast[c.i] == .scope_end);
+        c.i += 1;
+        const count = c.locals.items.len - locals_start;
+        if (count > 0) try c.emitPld(.pop_n, @intCast(count));
+    }
+
+    fn findVarIdx(c: *Compiler, id: u24) ?usize {
+        const frame_start: usize = c.frame orelse 0;
+        const frame = c.locals.items[frame_start..];
+        var idx = frame.len;
+        var f_it = std.mem.reverseIterator(frame);
+        while (f_it.next()) |local| {
+            idx -= 1;
+            if (id == local) {
+                return idx;
+            }
+        }
+        return null;
+    }
+
+    fn compileIf(c: *Compiler) CompilerError!void {
+        // cond is already compiled at this point
+        const patch_jze = c.prog.insts.items.len;
+        try c.emit(.jmpf); // must be patched
+        try c.compileBody();
+        switch (c.ast[c.i]) {
+            .if_end => {
+                c.i += 1; // eat .if_end
+                c.prog.insts.items[patch_jze].pld = @intCast(c.prog.insts.items.len); // patch jze
+            },
+            .if_else => {
+                c.i += 1; // eat .if_else
+                const patch_jmp = c.prog.insts.items.len;
+                try c.emit(.jmp);
+                c.prog.insts.items[patch_jze].pld = @intCast(c.prog.insts.items.len); // patch jze
+
+                try c.compileBody();
+                c.prog.insts.items[patch_jmp].pld = @intCast(c.prog.insts.items.len); // patch jmp
+                std.debug.assert(c.ast[c.i] == .if_end);
+                c.i += 1;
+            },
+            else => unreachable,
+        }
+    }
+
+    fn compileWhile(c: *Compiler) CompilerError!void {
+        const loop_top = c.prog.insts.items.len;
+        try c.compileBody(); // compiles the condition
+        std.debug.assert(c.ast[c.i] == .while_do);
+        c.i += 1;
+        const patch_jze = c.prog.insts.items.len;
+        try c.emit(.jmpf);
+        try c.compileBody(); // compiles the body of the while
+        std.debug.assert(c.ast[c.i] == .while_end);
+        c.i += 1;
+        try c.emitPld(.jmp, @intCast(loop_top));
+        c.prog.insts.items[patch_jze].pld = @intCast(c.prog.insts.items.len);
+    }
+
+    fn emit(c: *Compiler, comptime op: Vm.Inst.Op) !void {
+        try c.emitPld(op, 0);
+    }
+
+    fn emitPld(c: *Compiler, comptime op: Vm.Inst.Op, pld: u24) !void {
+        try c.prog.insts.append(c.prog.gpa, .{ .op = op, .pld = pld });
     }
 };
-
-pub fn compile(
-    gpa: Allocator,
-    ast: Parser.Ast,
-    insts: *std.ArrayList(Vm.Inst),
-    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
-    fn_table: []Vm.FnInfo,
-) CompilerError!usize {
-    var ctx: Context = .{
-        .i = 0,
-        .frame = null,
-        .locals = .empty,
-    };
-    defer ctx.deinit(gpa);
-    const start = insts.items.len;
-    try compileBody(&ctx, gpa, ast, insts, fn_map, fn_table);
-    try emit(gpa, insts, .halt);
-    return start;
-}
-
-fn compileBody(
-    ctx: *Context,
-    gpa: Allocator,
-    ast: Parser.Ast,
-    insts: *std.ArrayList(Vm.Inst),
-    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
-    fn_table: []Vm.FnInfo,
-) CompilerError!void {
-    while (ctx.i < ast.len) {
-        const node = ast[ctx.i];
-        ctx.i += 1;
-        switch (node) {
-            .scope_end, .fn_end, .while_end, .while_do, .if_else, .if_end => {
-                ctx.i -= 1; // will be checked by the caller
-            },
-            .neg_expr => try emit(gpa, insts, .neg),
-            .not_expr => try emit(gpa, insts, .not),
-            .add_expr => try emit(gpa, insts, .add),
-            .sub_expr => try emit(gpa, insts, .sub),
-            .mul_expr => try emit(gpa, insts, .mul),
-            .div_expr => try emit(gpa, insts, .div),
-            .eql_expr => try emit(gpa, insts, .eql),
-            .not_eql_expr => {
-                try emit(gpa, insts, .eql);
-                try emit(gpa, insts, .not);
-            },
-            .lt_expr => try emit(gpa, insts, .lt),
-            .lt_eql_expr => {
-                try emit(gpa, insts, .gt);
-                try emit(gpa, insts, .not);
-            },
-            .gt_expr => try emit(gpa, insts, .gt),
-            .gt_eql_expr => {
-                try emit(gpa, insts, .lt);
-                try emit(gpa, insts, .not);
-            },
-            .nil => try emit(gpa, insts, .nil),
-            .const_int => |id| {
-                try emitPld(gpa, insts, .const_int, id);
-            },
-            .call_expr => |call| {
-                const f_idx = fn_map.get(call.id) orelse return error.FnNotDefined;
-                const f_info = fn_table[f_idx];
-                if (f_info.arity != call.arg_c) return error.WrongNumberOfArgs;
-                try emitPld(gpa, insts, .call, f_idx);
-            },
-            .print_stmt => {
-                try emit(gpa, insts, .print);
-            },
-            .return_stmt => {
-                try emit(gpa, insts, .ret);
-            },
-            .expr_stmt => {
-                try emit(gpa, insts, .pop);
-            },
-            .dec_param => |id| {
-                try ctx.locals.append(gpa, .{ .id = id });
-            },
-            .dec_var => |id| {
-                if (ctx.frame == null) {
-                    try emitPld(gpa, insts, .dec_glob, id);
-                } else {
-                    try ctx.locals.append(gpa, .{ .id = id });
-                }
-            },
-            .get_var => |id| {
-                if (findVarIdx(ctx, id)) |idx| {
-                    try emitPld(gpa, insts, .get_locl, @intCast(idx));
-                } else {
-                    try emitPld(gpa, insts, .get_glob, id);
-                }
-            },
-            .set_var => |id| {
-                if (findVarIdx(ctx, id)) |idx| {
-                    try emitPld(gpa, insts, .set_locl, @intCast(idx));
-                } else {
-                    try emitPld(gpa, insts, .set_glob, id);
-                }
-            },
-            .scope_begin => try compileScope(ctx, gpa, ast, insts, fn_map, fn_table),
-            .fn_begin => |f| try compileFn(ctx, gpa, f, ast, insts, fn_map, fn_table),
-            .if_then => try compileIf(ctx, gpa, ast, insts, fn_map, fn_table),
-            .while_begin => try compileWhile(ctx, gpa, ast, insts, fn_map, fn_table),
-            // else => |n| std.debug.panic("nyi: {t}", .{n}),
-        }
-    }
-}
-
-fn compileFn(
-    ctx: *Context,
-    gpa: Allocator,
-    f: Parser.Node.VariantType(.fn_begin),
-    ast: Parser.Ast,
-    insts: *std.ArrayList(Vm.Inst),
-    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
-    fn_table: []Vm.FnInfo,
-) CompilerError!void {
-    const idx = fn_map.get(f.id) orelse return error.FnNotDefined;
-    const patch = insts.items.len;
-    try emit(gpa, insts, .jmp);
-    fn_table[idx].entry_point = insts.items.len;
-    const curr_frame = ctx.frame;
-    ctx.frame = ctx.locals.items.len;
-    defer ctx.frame = curr_frame;
-    defer ctx.locals.items.len = ctx.frame.?;
-
-    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table);
-    std.debug.assert(ast[ctx.i] == .fn_end);
-    ctx.i += 1;
-
-    try emit(gpa, insts, .nil);
-    try emit(gpa, insts, .ret);
-    insts.items[patch].pld = @intCast(insts.items.len);
-}
-
-fn compileScope(
-    ctx: *Context,
-    gpa: Allocator,
-    ast: Parser.Ast,
-    insts: *std.ArrayList(Vm.Inst),
-    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
-    fn_table: []Vm.FnInfo,
-) CompilerError!void {
-    const locals_start = ctx.locals.items.len;
-    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table);
-    const count = ctx.locals.items.len - locals_start;
-    if (count > 0) try emitPld(gpa, insts, .pop_n, @intCast(count));
-}
-
-fn findVarIdx(ctx: *Context, id: u24) ?usize {
-    const frame_start: usize = ctx.frame orelse 0;
-    const frame = ctx.locals.items[frame_start..];
-    var idx = frame.len;
-    var f_it = std.mem.reverseIterator(frame);
-    while (f_it.next()) |local| {
-        idx -= 1;
-        if (id == local.id) {
-            return idx;
-        }
-    }
-    return null;
-}
-
-fn compileIf(
-    ctx: *Context,
-    gpa: Allocator,
-    ast: Parser.Ast,
-    insts: *std.ArrayList(Vm.Inst),
-    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
-    fn_table: []Vm.FnInfo,
-) CompilerError!void {
-    // cond is already compiled at this point
-    const patch_jze = insts.items.len;
-    try emit(gpa, insts, .jze); // must be patched
-    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table);
-    switch (ast[ctx.i]) {
-        .if_end => {
-            ctx.i += 1; // eat .if_end
-            insts.items[patch_jze].pld = @intCast(insts.items.len); // patch jze
-        },
-        .if_else => {
-            ctx.i += 1; // eat .if_else
-            const patch_jmp = insts.items.len;
-            try emit(gpa, insts, .jmp);
-            insts.items[patch_jze].pld = @intCast(insts.items.len); // patch jze
-
-            try compileBody(ctx, gpa, ast, insts, fn_map, fn_table);
-            insts.items[patch_jmp].pld = @intCast(insts.items.len); // patch jmp
-            std.debug.assert(ast[ctx.i] == .if_end);
-            ctx.i += 1;
-        },
-        else => unreachable,
-    }
-}
-
-fn compileWhile(
-    ctx: *Context,
-    gpa: Allocator,
-    ast: Parser.Ast,
-    insts: *std.ArrayList(Vm.Inst),
-    fn_map: *std.AutoHashMapUnmanaged(u24, u24),
-    fn_table: []Vm.FnInfo,
-) CompilerError!void {
-    const loop_top = insts.items.len;
-    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table); // compiles the condition
-    std.debug.assert(ast[ctx.i] == .while_do);
-    ctx.i += 1;
-    const patch_jze = insts.items.len;
-    try emit(gpa, insts, .jze);
-    try compileBody(ctx, gpa, ast, insts, fn_map, fn_table); // compiles the body of the while
-    std.debug.assert(ast[ctx.i] == .while_end);
-    ctx.i += 1;
-    try emitPld(gpa, insts, .jmp, @intCast(loop_top));
-    insts.items[patch_jze].pld = @intCast(insts.items.len);
-}
-
-fn emit(gpa: Allocator, insts: *std.ArrayList(Vm.Inst), comptime op: Vm.Inst.Op) !void {
-    try emitPld(gpa, insts, op, 0);
-}
-
-fn emitPld(gpa: Allocator, insts: *std.ArrayList(Vm.Inst), comptime op: Vm.Inst.Op, pld: u24) !void {
-    try insts.append(gpa, .{ .op = op, .pld = pld });
-}

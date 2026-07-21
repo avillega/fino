@@ -64,6 +64,9 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buf: [4096]u8 = undefined;
     var stdout_w = Io.File.stdout().writer(io, &stdout_buf);
     const out = &stdout_w.interface;
+    defer out.flush() catch {
+        unreachable;
+    };
 
     // var custom_gpa = std.heap.DebugAllocator(.{ .stack_trace_frames = 25 }){};
     // defer std.debug.assert(custom_gpa.deinit() == .ok);
@@ -90,21 +93,29 @@ fn runFile(out: *Io.Writer, io: Io, gpa: std.mem.Allocator, file_path: []const u
         return err;
     };
     defer gpa.free(src);
-    var engine: fino.Engine = .init(out, gpa);
-    defer engine.deinit();
 
+    var prog: fino.Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: fino.Vm = .init(out);
+    defer vm.deinit(gpa);
+
+    try runSrc(&prog, &vm, gpa, src, mode);
+}
+
+fn runSrc(prog: *fino.Program, vm: *fino.Vm, gpa: std.mem.Allocator, src: [:0]const u8, mode: Mode) !void {
+    const out = vm.out;
     switch (mode) {
         .normal => {
-            engine.run(src) catch |e| {
+            prog.run(vm, src) catch |e| {
                 try out.print("error: {t}\n", .{e});
             };
         },
-        .lexer => try engine.printTokens(src),
-        .bench => try engine.benchParser(src),
-        .astsize => try engine.printAstSize(src),
-        .parser_flat => try engine.printAstFlat(src),
-        .parser_tree => try engine.printAstTree(src),
-        .compiler => try engine.printInsts(src),
+        .lexer => try fino.display.printTokens(out, src),
+        .bench => try prog.benchParser(src),
+        .astsize => try fino.display.printAstSize(out, gpa, src),
+        .parser_flat => try fino.display.printAstFlat(out, gpa, src),
+        .parser_tree => try fino.display.printAstTree(out, gpa, src),
+        .compiler => try prog.printInsts(out, src),
     }
 }
 
@@ -118,8 +129,11 @@ fn runRepl(out: *Io.Writer, io: Io, gpa: std.mem.Allocator) !void {
     try out.print("fino repl. type /h for help.\n", .{});
     try out.flush();
 
-    var engine: fino.Engine = .init(out, gpa);
-    defer engine.deinit();
+    // session state: the growing compiled image plus the vm globals
+    var prog: fino.Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: fino.Vm = .init(out);
+    defer vm.deinit(gpa);
 
     while (true) {
         try out.print("{s}> ", .{mode.prompt()});
@@ -150,19 +164,7 @@ fn runRepl(out: *Io.Writer, io: Io, gpa: std.mem.Allocator) !void {
         mut_ptr[trimmed.len] = 0;
         const src: [:0]const u8 = mut_ptr[0..trimmed.len :0];
 
-        switch (mode) {
-            .normal => {
-                engine.run(src) catch |e| {
-                    try out.print("error: {t}\n", .{e});
-                };
-            },
-            .bench => try engine.benchParser(src),
-            .astsize => try engine.printAstSize(src),
-            .lexer => try engine.printTokens(src),
-            .parser_flat => try engine.printAstFlat(src),
-            .parser_tree => try engine.printAstTree(src),
-            .compiler => try engine.printInsts(src),
-        }
+        try runSrc(&prog, &vm, gpa, src, mode);
 
         try out.flush();
     }

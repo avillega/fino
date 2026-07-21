@@ -200,14 +200,14 @@ fn do_compile(
         .if_stmt => |if_s| {
             try do_compile(gpa, if_s.cond, insts, fn_map, fn_table, locals, depth + 1);
             const cond_patch = insts.items.len;
-            try insts.append(gpa, .{ .op = .jze }); // must be patched
+            try insts.append(gpa, .{ .op = .jmpf }); // must be patched
 
             try do_compile(gpa, if_s.then_branch, insts, fn_map, fn_table, locals, depth + 1);
 
             const then_patch = insts.items.len;
             try insts.append(gpa, .{ .op = .jmp }); // must be patched
 
-            std.debug.assert(insts.items[cond_patch].op == .jze);
+            std.debug.assert(insts.items[cond_patch].op == .jmpf);
             insts.items[cond_patch].pld = @intCast(insts.items.len);
 
             if (if_s.else_branch) |eb| {
@@ -222,13 +222,13 @@ fn do_compile(
 
             try do_compile(gpa, while_s.cond, insts, fn_map, fn_table, locals, depth + 1);
             const cond_patch = insts.items.len;
-            try insts.append(gpa, .{ .op = .jze }); // must be patched
+            try insts.append(gpa, .{ .op = .jmpf }); // must be patched
 
             try do_compile(gpa, while_s.body, insts, fn_map, fn_table, locals, depth + 1);
 
             try insts.append(gpa, .{ .op = .jmp, .pld = @intCast(cond_start) });
 
-            std.debug.assert(insts.items[cond_patch].op == .jze);
+            std.debug.assert(insts.items[cond_patch].op == .jmpf);
             insts.items[cond_patch].pld = @intCast(insts.items.len);
         },
     }

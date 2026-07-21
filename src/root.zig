@@ -1,12 +1,21 @@
 const build_opts = @import("build_opts");
 
-pub const Engine = switch (build_opts.kind) {
-    .moar_smaller => @import("moar_smaller/Engine.zig"),
-    .post_tree => @import("post_tree/Engine.zig"),
-    .forest_pointer => @import("forest_pointer/Engine.zig"),
-    .index_sea => @import("index_sea/Engine.zig"),
+pub const Vm = @import("Vm.zig");
+
+// Only post_tree tracks the current Lexer; the other variants are stale
+// benchmark experiments (they still use the old .endl/.semi token tags and
+// the Engine struct) and no longer compile.
+pub const Program = switch (build_opts.kind) {
+    .post_tree => @import("post_tree/Program.zig"),
+    else => @compileError("variant '" ++ @tagName(build_opts.kind) ++ "' is stale; only post_tree builds"),
+};
+
+pub const display = switch (build_opts.kind) {
+    .post_tree => @import("post_tree/display.zig"),
+    else => @compileError("variant '" ++ @tagName(build_opts.kind) ++ "' is stale; only post_tree builds"),
 };
 
 test {
-    _ = Engine;
+    _ = Program;
+    _ = display;
 }

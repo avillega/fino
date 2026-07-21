@@ -187,7 +187,7 @@ pub fn compile(
             },
             .if_then => {
                 try patch_sites.append(gpa, @intCast(insts.items.len));
-                try insts.append(gpa, .{ .op = .jze }); // must be patched
+                try insts.append(gpa, .{ .op = .jmpf }); // must be patched
             },
             .if_else => {
                 const patch_site = patch_sites.pop().?;
@@ -206,7 +206,7 @@ pub fn compile(
             },
             .while_do => {
                 try patch_sites.append(gpa, @intCast(insts.items.len));
-                try insts.append(gpa, .{ .op = .jze }); // must be patched
+                try insts.append(gpa, .{ .op = .jmpf }); // must be patched
             },
             .while_end => {
                 try insts.append(gpa, .{ .op = .jmp, .pld = loop_tops.pop().? }); // must be patched

@@ -18,6 +18,7 @@ interner: *Interner,
 const Tag = enum(u8) {
     nil,
     const_int,
+    str_lit,
     dec_var,
     dec_param,
     set_var,
@@ -35,7 +36,6 @@ const Tag = enum(u8) {
     gt_expr,
     gt_eql_expr,
     call_expr,
-    print_stmt,
     return_stmt,
     expr_stmt,
 
@@ -58,6 +58,7 @@ const Tag = enum(u8) {
 pub const Node = union(Tag) {
     nil,
     const_int: u24,
+    str_lit: u24,
     dec_var: u24,
     dec_param: u24,
     set_var: u24,
@@ -75,7 +76,6 @@ pub const Node = union(Tag) {
     gt_expr,
     gt_eql_expr,
     call_expr: packed struct(u32) { id: u24, arg_c: u8 },
-    print_stmt,
     return_stmt,
     expr_stmt,
 
@@ -188,12 +188,6 @@ fn parseDecl(self: *Parser, gpa: Allocator) Error!void {
 
 fn parseStmt(self: *Parser, gpa: Allocator) Error!void {
     switch (self.curr.tag) {
-        .kw_print => {
-            self.advanceTokens(); // eat the kw_print
-            try self.parseExpr(gpa, 0);
-            try self.expectEndStmt();
-            try self.addNode(gpa, .print_stmt);
-        },
         .identifier => {
             // handle setting to an already declared variable
             if (self.peek.tag == .eql) {
@@ -336,6 +330,10 @@ fn parseFactor(self: *Parser, gpa: Allocator) Error!void {
                 try self.addNode(gpa, .{ .get_var = id });
             }
         },
+        .str_lit => {
+            const id = try self.internStrLit();
+            try self.addNode(gpa, .{ .str_lit = id });
+        },
         .oparen => {
             self.advanceTokens();
             try self.parseExpr(gpa, 0);
@@ -363,6 +361,12 @@ fn parseIdentifier(self: *Parser) !u24 {
     const ident_token = try self.expectToken(.identifier);
     const ident = ident_token.lexeme(self.src);
     return try self.interner.intern_s(ident);
+}
+
+fn internStrLit(self: *Parser) !u24 {
+    const str_token = try self.expectToken(.str_lit);
+    const lit = str_token.lexeme(self.src);
+    return try self.interner.intern_s(lit);
 }
 
 fn addNode(self: *Parser, gpa: Allocator, node: Node) !void {
@@ -513,8 +517,8 @@ test "parse: simple block" {
     const src =
         \\ {
         \\      var x = 5
-        \\      x = 3; print 1 + 1
-        \\      print 2 + x
+        \\      x = 3; print(1 + 1)
+        \\      print(2 + x)
         \\ }
     ;
     var parser = Parser.init(src, &interner);
@@ -530,12 +534,39 @@ test "parse: simple block" {
         .{ .const_int = 2 },
         .{ .const_int = 2 },
         .add_expr,
-        .print_stmt,
+        .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
+        .expr_stmt,
         .{ .const_int = 3 },
         .{ .get_var = 0 },
         .add_expr,
-        .print_stmt,
+        .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
+        .expr_stmt,
         .{ .scope_end = 4 },
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+
+test "parse: simple function call" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ print(x)
+        \\ print(1+2)
+    ;
+    var parser = Parser.init(src, &interner);
+    const ast = try parser.parse(gpa);
+    defer gpa.free(ast);
+
+    const expected = [_]Node{
+        .{ .get_var = 1 },
+        .{ .call_expr = .{ .id = 0, .arg_c = 1 } },
+        .expr_stmt,
+        .{ .const_int = 0 },
+        .{ .const_int = 1 },
+        .add_expr,
+        .{ .call_expr = .{ .id = 0, .arg_c = 1 } },
+        .expr_stmt,
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
 }
@@ -547,7 +578,7 @@ test "parse: simple if" {
     const src =
         \\ if x == 0 {
         \\      var x = 5
-        \\      print x
+        \\      print(x)
         \\ }
     ;
     var parser = Parser.init(src, &interner);
@@ -563,7 +594,8 @@ test "parse: simple if" {
         .{ .const_int = 1 },
         .{ .dec_var = 0 },
         .{ .get_var = 0 },
-        .print_stmt,
+        .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
+        .expr_stmt,
         .{ .scope_end = 2 },
         .{ .if_end = 3 },
     };
@@ -576,10 +608,10 @@ test "parse: simple if/else" {
     const src =
         \\ if x == 0 {
         \\      var x = 5
-        \\      print x
+        \\      print(x)
         \\ } else {
         \\    var y = 5
-        \\    print y
+        \\    print(y)
         \\}
         \\
     ;
@@ -596,14 +628,16 @@ test "parse: simple if/else" {
         .{ .const_int = 1 },
         .{ .dec_var = 0 },
         .{ .get_var = 0 },
-        .print_stmt,
+        .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
+        .expr_stmt,
         .{ .scope_end = 2 },
         .if_else,
         .scope_begin,
         .{ .const_int = 1 },
-        .{ .dec_var = 1 },
-        .{ .get_var = 1 },
-        .print_stmt,
+        .{ .dec_var = 2 },
+        .{ .get_var = 2 },
+        .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
+        .expr_stmt,
         .{ .scope_end = 2 },
         .{ .if_end = 5 },
     };
@@ -617,13 +651,13 @@ test "parse: simple if/elseif/else" {
     const src =
         \\ if x == 0 {
         \\      var x = 5
-        \\      print x
+        \\      print(x)
         \\ } else if y == 0 {
         \\    var y = 5
-        \\    print y
+        \\    print(y)
         \\ } else {
         \\    var z = 5
-        \\    print z
+        \\    print(z)
         \\}
         \\
     ;
@@ -640,28 +674,48 @@ test "parse: simple if/elseif/else" {
         .{ .const_int = 1 },
         .{ .dec_var = 0 },
         .{ .get_var = 0 },
-        .print_stmt,
+        .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
+        .expr_stmt,
         .{ .scope_end = 2 },
         .if_else,
-        .{ .get_var = 1 },
+        .{ .get_var = 2 },
         .{ .const_int = 0 },
         .eql_expr,
         .if_then,
         .scope_begin,
         .{ .const_int = 1 },
-        .{ .dec_var = 1 },
-        .{ .get_var = 1 },
-        .print_stmt,
+        .{ .dec_var = 2 },
+        .{ .get_var = 2 },
+        .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
+        .expr_stmt,
         .{ .scope_end = 2 },
         .if_else,
         .scope_begin,
         .{ .const_int = 1 },
-        .{ .dec_var = 2 },
-        .{ .get_var = 2 },
-        .print_stmt,
+        .{ .dec_var = 3 },
+        .{ .get_var = 3 },
+        .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
+        .expr_stmt,
         .{ .scope_end = 2 },
         .{ .if_end = 5 },
         .{ .if_end = 5 },
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+test "parse: simple string literal" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ var a = "my_string/lit"
+    ;
+    var parser = Parser.init(src, &interner);
+    const ast = try parser.parse(gpa);
+    defer gpa.free(ast);
+    const expected = [_]Node{
+        .{ .str_lit = 1 },
+        .{ .dec_var = 0 },
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
+    try std.testing.expectEqualStrings("my_string/lit", try interner.get_s(1));
 }
