@@ -358,7 +358,7 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
                 e.destroy(gpa);
             }
             stack.shrinkRetainingCapacity(frame_base);
-            try stack.append(gpa, try res.clone(gpa));
+            try stack.append(gpa, res);
 
             const frame = call_stack.pop().?;
             frame_base = frame.saved_frame_base;
