@@ -18,6 +18,7 @@ pub fn compile(prog: *Program, ast: Parser.Ast) CompilerError!usize {
         .i = 0,
         .frame = null,
         .locals = .empty,
+        .depth = 0,
     };
     defer c.locals.deinit(prog.gpa);
 
@@ -47,6 +48,7 @@ const Compiler = struct {
     i: usize,
     frame: ?usize, // start of the current fn frame in locals; null at top level
     locals: std.ArrayList(u24),
+    depth: u32,
 
     fn compileBody(c: *Compiler) CompilerError!void {
         while (c.i < c.ast.len) {
@@ -83,6 +85,17 @@ const Compiler = struct {
                 .str_lit => |id| try c.emitPld(.str_lit, id),
                 .arr_lit => |elem_cnt| try c.emitPld(.arr_lit, elem_cnt),
                 .get_index => try c.emit(.get_index),
+                .set_index => |id| {
+                    if (c.findVarIdx(id)) |slot| {
+                        try c.emitPld(.take_locl, @intCast(slot));
+                        try c.emit(.set_index);
+                        try c.emitPld(.set_locl, @intCast(slot));
+                    } else {
+                        try c.emitPld(.take_glob, id);
+                        try c.emit(.set_index);
+                        try c.emitPld(.set_glob, id);
+                    }
+                },
                 .call_expr => |call| {
                     const f_idx = c.prog.fn_map.get(call.id) orelse return error.FnNotDefined;
                     const f_info = c.prog.fn_table.items[f_idx];
@@ -110,7 +123,7 @@ const Compiler = struct {
                     try c.locals.append(c.prog.gpa, id);
                 },
                 .dec_var => |id| {
-                    if (c.frame == null) {
+                    if (c.depth == 0) {
                         try c.emitPld(.dec_glob, id);
                     } else {
                         try c.locals.append(c.prog.gpa, id);
@@ -160,6 +173,8 @@ const Compiler = struct {
 
     fn compileScope(c: *Compiler) CompilerError!void {
         const locals_start = c.locals.items.len;
+        c.depth += 1;
+        defer c.depth -= 1;
         try c.compileBody();
         std.debug.assert(c.ast[c.i] == .scope_end);
         c.i += 1;

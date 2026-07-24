@@ -57,17 +57,22 @@ pub fn run(prog: *Program, vm: *Vm, src: [:0]const u8) !void {
         return;
     };
     defer prog.gpa.free(ast);
+    defer vm.out.flush() catch {};
 
     const start = try compiler.compile(prog, ast);
 
-    try vm.interpret(
+    vm.interpret(
         prog.gpa,
         start,
         prog.insts.items,
         &prog.interner,
         prog.fn_table.items,
-    );
-    try vm.out.flush();
+    ) catch |e| {
+        try vm.out.print("{s}\n", .{vm.err orelse ""});
+        defer if (vm.err) |err| prog.gpa.free(err);
+
+        return e;
+    };
 }
 
 pub fn benchParser(prog: *Program, src: [:0]const u8) !void {
@@ -242,4 +247,196 @@ test "run: array indexing" {
         \\print(x[1])
     );
     try std.testing.expectEqualStrings("1\n2\n", w.buffered());
+}
+
+test "run: array setting index" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\var x = [1, 2, 3]
+        \\print(x[0])
+        \\x[0] = "hello"
+        \\print(x[0])
+        \\{
+        \\  var x = [4, 5, 6]
+        \\  print(x[0])
+        \\  x[0] = "world"
+        \\  print(x[0])
+        \\}
+    );
+    try std.testing.expectEqualStrings("1\nhello\n4\nworld\n", w.buffered());
+}
+
+test "run: must not leak" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\ var i = 0; while i < 1000 { var t = [i, i]; i = i + 1}
+        \\ var x = ["hello", "world"]; x[0] = "hola"
+    );
+}
+
+test "run: global array aliasing is invisible" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\ var a = [1, 2, 3]; var b = a; b[0] = 99; print(a[0], b[0])
+    );
+    try std.testing.expectEqualStrings("1 99\n", w.buffered());
+}
+
+test "run: local array aliasing is invisible" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\fn main() {
+        \\  var a = [1, 2, 3]; var b = a; b[0] = 99; print(a[0], b[0])
+        \\}
+        \\main()
+    );
+    try std.testing.expectEqualStrings("1 99\n", w.buffered());
+}
+
+test "run: return heap allocatoted object" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\fn main() {
+        \\  var a = [1, 2, 3]
+        \\  return a
+        \\}
+        \\var res = main()
+        \\print(res)
+    );
+    try std.testing.expectEqualStrings("[1, 2, 3]\n", w.buffered());
+}
+
+test "run: string equality" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\print("foo" + "bar" == "foobar")
+    );
+    try std.testing.expectEqualStrings("1\n", w.buffered());
+}
+
+test "run: array concatenation" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\var a = [1, 2, 3]
+        \\var b = [4, 5, 6]
+        \\var c = a + b
+        \\print(a, b, c)
+    );
+    try std.testing.expectEqualStrings("[1, 2, 3] [4, 5, 6] [1, 2, 3, 4, 5, 6]\n", w.buffered());
+}
+
+test "run: negative array indexes must fail" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try std.testing.expectError(
+        error.IndexOutOfBounds,
+        prog.run(&vm,
+            \\var a = [1, 2, 3]
+            \\a[-1] = "hello"
+        ),
+    );
+}
+
+test "run: setting array past its length must fail" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try std.testing.expectError(
+        error.IndexOutOfBounds,
+        prog.run(&vm,
+            \\var a = [1, 2, 3]
+            \\a[3] = "hello"
+        ),
+    );
+}
+
+test "run: mutate function parameter" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w);
+    defer vm.deinit(gpa);
+
+    try prog.run(&vm,
+        \\fn main(xs) {
+        \\  xs[0] = "hello"
+        \\  print(xs[0])
+        \\}
+        \\var xs = [1, 2, 3]
+        \\main(xs)
+        \\print(xs)
+    );
+    try std.testing.expectEqualStrings("hello\n[1, 2, 3]\n", w.buffered());
 }

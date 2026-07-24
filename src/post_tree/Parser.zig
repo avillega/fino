@@ -40,6 +40,7 @@ const Tag = enum(u8) {
     return_stmt,
     expr_stmt,
     get_index,
+    set_index,
 
     // this are markers
     scope_begin,
@@ -82,6 +83,7 @@ pub const Node = union(Tag) {
     return_stmt,
     expr_stmt,
     get_index,
+    set_index: u24,
 
     // this are markers
     scope_begin,
@@ -109,6 +111,7 @@ const Error = error{
     UnexpectedToken,
     UnfinishedStmt,
     TooManyArgs,
+    InvalidAssignmentTarget,
 } || Allocator.Error || std.fmt.ParseIntError;
 
 pub fn init(src: [:0]const u8, interner: *Interner) Parser {
@@ -204,10 +207,29 @@ fn parseStmt(self: *Parser, gpa: Allocator) Error!void {
                 return;
             }
 
-            // otherwise handle it as a normal expression
+            const pos = self.nodes.items.len;
             try self.parseExpr(gpa, 0);
-            try self.expectEndStmt();
-            try self.addNode(gpa, .expr_stmt);
+            if (self.curr.tag == .eql) {
+                // the expression at pos is an idx assignment
+                if (!(self.nodes.items[pos] == .get_var and
+                    self.nodes.items[self.nodes.items.len - 1] == .get_index))
+                {
+                    return error.InvalidAssignmentTarget;
+                }
+
+                _ = self.nodes.pop(); // remove the .get_index
+                const var_id = self.nodes.orderedRemove(pos).get_var;
+                // At this point the index expression is at the top
+
+                self.advanceTokens(); // eat the .eql
+                try self.parseExpr(gpa, 0);
+                try self.expectEndStmt();
+                try self.addNode(gpa, .{ .set_index = var_id });
+            } else {
+                // otherwise handle it as a normal expression
+                try self.expectEndStmt();
+                try self.addNode(gpa, .expr_stmt);
+            }
         },
         .obrace => {
             try self.parseBlock(gpa);
@@ -787,4 +809,34 @@ test "parse: simple array index get" {
         .expr_stmt,
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+
+test "parse: simple array index set" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ a[10] = 2
+    ;
+    var parser = Parser.init(src, &interner);
+    const ast = try parser.parse(gpa);
+    defer gpa.free(ast);
+    const expected = [_]Node{
+        .{ .const_int = 0 },
+        .{ .const_int = 1 },
+        .{ .set_index = 0 },
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+
+test "parse: array index error" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ a[10] + 10 = 2
+    ;
+    var parser = Parser.init(src, &interner);
+    try std.testing.expectError(error.InvalidAssignmentTarget, parser.parse(gpa));
+    defer parser.nodes.deinit(gpa);
 }

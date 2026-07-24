@@ -4,7 +4,7 @@ const Value = Vm.Value;
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
-const NativeError = error{ MustBeArray, TooFewArgs } || Allocator.Error || Writer.Error;
+const NativeError = error{ TargetMustBeArray, TooFewArgs } || Allocator.Error || Writer.Error;
 
 pub const NativeFn = *const fn (vm: *Vm, gpa: Allocator, args: []Value) NativeError!Value;
 
@@ -37,15 +37,15 @@ pub fn len(vm: *Vm, gpa: Allocator, args: []Value) NativeError!Value {
 pub fn append(vm: *Vm, gpa: Allocator, args: []Value) NativeError!Value {
     _ = vm;
     if (args.len < 2) return error.TooFewArgs;
-    var result = args[0];
+    if (args[0] != .arr) return error.TargetMustBeArray;
+    const result = try args[0].arr.ensureUnique(gpa);
     args[0] = .nil;
-    if (result != .arr) return error.MustBeArray;
+    try result.elems.ensureUnusedCapacity(gpa, args.len - 1);
 
-    for (args[1..]) |*e| {
-        try result.arr.elems.append(gpa, e.*);
-        e.* = .nil;
+    for (args[1..]) |e| {
+        result.elems.appendAssumeCapacity(e.retain());
     }
-    return result;
+    return .{ .arr = result };
 }
 
 const NativeDef = struct {
