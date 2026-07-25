@@ -107,6 +107,7 @@ fn writeLabel(w: *Io.Writer, interner: *Interner, n: Parser.Node) !void {
         .dec_var,
         .dec_param,
         .get_var,
+        .take_var,
         => |i| try w.print("{t} {s}", .{ n, try interner.get_s(i) }),
         .str_lit => |i| try w.print("{t} \"{s}\"", .{ n, try interner.get_s(i) }),
         .fn_end => |f| try w.print("fn {s}", .{try interner.get_s(f.id)}),
@@ -126,6 +127,7 @@ inline fn displayArity(n: Parser.Node) u32 {
     return switch (n) {
         .const_int,
         .get_var,
+        .take_var,
         .dec_param,
         .nil,
         .if_then,
@@ -136,7 +138,6 @@ inline fn displayArity(n: Parser.Node) u32 {
         .dec_var,
         .neg_expr,
         .not_expr,
-
         .return_stmt,
         .expr_stmt,
         .while_do,
@@ -190,6 +191,7 @@ test "printAstTree: every construct" {
         \\    print(g)
         \\    var x = [1, 2, 3]
         \\    var y = x[1]
+        \\    x = f(y, x)
         \\}
         \\var arr = [1, 2, 3]
         \\arr[1] = "hello"
@@ -251,7 +253,7 @@ test "printAstTree: every construct" {
         \\│ │ │ │ block
         \\│ │ │ │ │ set_var g
         \\│ │ │ │ │ │ add_expr
-        \\│ │ │ │ │ │ │ get_var g
+        \\│ │ │ │ │ │ │ take_var g
         \\│ │ │ │ │ │ │ const_int 1
         \\│ │ │ │ │ dec_var s
         \\│ │ │ │ │ │ str_lit "my_str/lit"
@@ -268,6 +270,10 @@ test "printAstTree: every construct" {
         \\│ │ get_index
         \\│ │ │ get_var x
         \\│ │ │ const_int 1
+        \\│ set_var x
+        \\│ │ call f/2
+        \\│ │ │ get_var y
+        \\│ │ │ take_var x
         \\dec_var arr
         \\│ array
         \\│ │ const_int 1

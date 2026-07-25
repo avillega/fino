@@ -51,6 +51,7 @@ const Compiler = struct {
     depth: u32,
 
     fn compileBody(c: *Compiler) CompilerError!void {
+        var pending_take: ?u24 = null;
         while (c.i < c.ast.len) {
             const node = c.ast[c.i];
             c.i += 1;
@@ -93,7 +94,7 @@ const Compiler = struct {
                     } else {
                         try c.emitPld(.take_glob, id);
                         try c.emit(.set_index);
-                        try c.emitPld(.set_glob, id);
+                        try c.emitPld(.put_glob, id);
                     }
                 },
                 .call_expr => |call| {
@@ -136,11 +137,24 @@ const Compiler = struct {
                         try c.emitPld(.get_glob, id);
                     }
                 },
+                .take_var => |id| {
+                    if (c.findVarIdx(id)) |idx| {
+                        try c.emitPld(.take_locl, @intCast(idx));
+                    } else {
+                        pending_take = id;
+                        try c.emitPld(.take_glob, id);
+                    }
+                },
                 .set_var => |id| {
                     if (c.findVarIdx(id)) |idx| {
                         try c.emitPld(.set_locl, @intCast(idx));
                     } else {
-                        try c.emitPld(.set_glob, id);
+                        if (pending_take) |taken_id| {
+                            std.debug.assert(taken_id == id);
+                            try c.emitPld(.put_glob, id);
+                        } else {
+                            try c.emitPld(.set_glob, id);
+                        }
                     }
                 },
                 .scope_begin => try c.compileScope(),

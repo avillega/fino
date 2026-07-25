@@ -53,6 +53,7 @@ const ArrayObj = struct {
 
 pub const Value = union(enum) {
     nil,
+    taken,
     int: i64,
     str: *StrObj,
     arr: *ArrayObj,
@@ -63,6 +64,7 @@ pub const Value = union(enum) {
     ) std.Io.Writer.Error!void {
         switch (v) {
             .nil => try w.writeAll("nil"),
+            .taken => try w.writeAll("<taken>"),
             .int => |i| try w.print("{d}", .{i}),
             .str => |s| try w.writeAll(s.buffer),
             .arr => |a| {
@@ -80,6 +82,7 @@ pub const Value = union(enum) {
 
     pub inline fn truthy(v: Value) bool {
         return switch (v) {
+            .taken => unreachable,
             .nil => false,
             .int => |i| if (i == 0) return false else true,
             else => true,
@@ -88,7 +91,7 @@ pub const Value = union(enum) {
 
     pub fn release(v: Value, gpa: Allocator) void {
         switch (v) {
-            .nil, .int => {},
+            .nil, .int, .taken => {},
             .str => |s| {
                 s.rc -= 1;
                 if (s.rc == 0) {
@@ -111,7 +114,7 @@ pub const Value = union(enum) {
 
     pub fn retain(v: Value) Value {
         switch (v) {
-            .nil, .int => {},
+            .nil, .int, .taken => {},
             .str => |s| {
                 std.debug.assert(s.rc != 0);
                 s.rc += 1;
@@ -150,6 +153,7 @@ pub const Inst = packed struct(u32) {
         print,
         dec_glob,
         set_glob,
+        put_glob, // sibling of set_glob to be used when take_glob is used
         get_glob,
         take_glob,
         set_locl,
@@ -169,6 +173,35 @@ pub const Inst = packed struct(u32) {
     op: Op,
     pld: u24 = undefined,
 
+    pub fn debugPrint(
+        i: @This(),
+        w: *std.Io.Writer,
+        vm: Vm,
+        interner: Interner,
+    ) std.Io.Writer.Error!void {
+        switch (i.op) {
+            .const_int => try w.print("{t} {d}", .{ i.op, interner.consts.items[i.pld] }),
+            .str_lit => try w.print("{t} {s}", .{ i.op, interner.strings.items[i.pld] }),
+            .dec_glob => try w.print("{t} {s}", .{ i.op, interner.strings.items[i.pld] }),
+            .set_glob,
+            .put_glob,
+            .get_glob,
+            .take_glob,
+            => try w.print("{t} {f}", .{ i.op, vm.globals.get(i.pld).? }),
+            .set_locl,
+            .get_locl,
+            .take_locl,
+            .arr_lit,
+            .pop_n,
+            .jmp,
+            .jmpf,
+            .jmpt,
+            .call,
+            => try w.print("{t} {d}", .{ i.op, i.pld }),
+            else => try w.print("{t}", .{i.op}),
+        }
+    }
+
     pub fn format(
         i: @This(),
         w: *std.Io.Writer,
@@ -180,6 +213,7 @@ pub const Inst = packed struct(u32) {
             .pop_n,
             .dec_glob,
             .set_glob,
+            .put_glob,
             .get_glob,
             .set_locl,
             .get_locl,
@@ -208,9 +242,14 @@ pub fn deinit(self: *Vm, gpa: std.mem.Allocator) void {
 
 const trace_enabled = false;
 
-inline fn trace(op: Inst.Op, pc: usize, stack: []const Value) Inst.Op {
+inline fn trace(inst: Inst, pc: usize, vm: *Vm, interner: *Interner, stack: []const Value) Inst.Op {
     if (comptime trace_enabled) {
-        std.debug.print("{d:>4}: {s:<10} [", .{ pc, @tagName(op) });
+        var buf: [256]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        inst.debugPrint(&writer, vm.*, interner.*) catch {};
+
+        const inst_str = buf[0..writer.end];
+        std.debug.print("{d:>4}: {s:<10} [", .{ pc, inst_str });
         for (stack, 0..) |v, i| {
             if (i != 0) std.debug.print(", ", .{});
             std.debug.print("{f}", .{v});
@@ -218,7 +257,7 @@ inline fn trace(op: Inst.Op, pc: usize, stack: []const Value) Inst.Op {
         std.debug.print("]\n", .{});
     }
 
-    return op;
+    return inst.op;
 }
 
 pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, interner: *Interner, fns: []FnInfo) !void {
@@ -236,24 +275,24 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
     defer call_stack.deinit(gpa);
 
     const next = struct {
-        inline fn op(p: *usize, is: []const Inst) Inst.Op {
+        inline fn op(p: *usize, is: []const Inst) Inst {
             p.* += 1;
-            return is[p.*].op;
+            return is[p.*];
         }
     }.op;
 
     var pc: usize = start;
     var frame_base: usize = 0;
 
-    loop: switch (insts[pc].op) {
+    loop: switch (trace(insts[pc], pc, vm, interner, stack.items)) {
         .nil => {
             try stack.append(gpa, .nil);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .const_int => {
             const v = interner.consts.items[insts[pc].pld];
             try stack.append(gpa, .{ .int = v });
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .str_lit => {
             const s = interner.strings.items[insts[pc].pld];
@@ -263,7 +302,7 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
                 .buffer = try gpa.dupe(u8, s),
             };
             try stack.append(gpa, .{ .str = str });
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .arr_lit => {
             const n = insts[pc].pld;
@@ -273,15 +312,15 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
             const arr = try gpa.create(ArrayObj);
             arr.* = ArrayObj{ .rc = 1, .elems = .fromOwnedSlice(elems) };
             try stack.append(gpa, .{ .arr = arr });
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         inline .neg, .not => |op| {
             try unop(&stack, gpa, op);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         inline .add, .sub, .mul, .div, .eql, .lt, .gt => |op| {
             try binop(&stack, gpa, op);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .dec_glob => {
             const id = insts[pc].pld;
@@ -296,50 +335,99 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
 
             const val = stack.pop().?;
             try vm.globals.put(gpa, insts[pc].pld, val);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .get_glob => {
             // add err field to the vm and print the variable that does not exists
             const val = vm.globals.get(insts[pc].pld) orelse return Error.RuntimeError;
+            if (val == .taken) {
+                vm.err = try std.fmt.allocPrint(
+                    gpa,
+                    "global {s} was moved and can not be used\n",
+                    .{try interner.get_s(insts[pc].pld)},
+                );
+                return error.RuntimeError;
+            }
             try stack.append(gpa, val.retain());
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .take_glob => {
             const val = vm.globals.getPtr(insts[pc].pld) orelse return Error.RuntimeError;
+            if (val.* == .taken) {
+                vm.err = try std.fmt.allocPrint(
+                    gpa,
+                    "global {s} was moved and can not be used\n",
+                    .{try interner.get_s(insts[pc].pld)},
+                );
+                return error.RuntimeError;
+            }
             try stack.append(gpa, val.*);
-            val.* = .nil;
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            val.* = .taken;
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .set_glob => {
             const id = insts[pc].pld;
-            // add err field to the vm and print the variable that does not exists
-            if (!vm.globals.contains(id)) return Error.RuntimeError;
+            const old = vm.globals.getPtr(id) orelse {
+                vm.err = try std.fmt.allocPrint(
+                    gpa,
+                    "global {s} does not exists\n",
+                    .{try interner.get_s(insts[pc].pld)},
+                );
+                return Error.RuntimeError;
+            };
 
-            const curr = vm.globals.get(id).?;
-            curr.release(gpa);
+            if (old.* == .taken) {
+                vm.err = try std.fmt.allocPrint(
+                    gpa,
+                    "attempting to write back to taken global {s}\n",
+                    .{try interner.get_s(insts[pc].pld)},
+                );
+                return Error.RuntimeError;
+            }
+
+            old.release(gpa);
 
             const val = stack.pop().?;
-            try vm.globals.put(gpa, id, val);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            old.* = val;
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+        },
+        .put_glob => {
+            const id = insts[pc].pld;
+            const old = vm.globals.getPtr(id) orelse {
+                vm.err = try std.fmt.allocPrint(
+                    gpa,
+                    "global {s} does not exists\n",
+                    .{try interner.get_s(insts[pc].pld)},
+                );
+                return Error.RuntimeError;
+            };
+
+            std.debug.assert(old.* == .taken);
+            const val = stack.pop().?;
+            old.* = val;
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .get_locl => {
             const v = stack.items[frame_base + insts[pc].pld];
+            std.debug.assert(v != .taken);
             try stack.append(gpa, v.retain());
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .take_locl => {
             const v = stack.items[frame_base + insts[pc].pld];
-            stack.items[frame_base + insts[pc].pld] = .nil;
+            std.debug.assert(v != .taken);
+
+            stack.items[frame_base + insts[pc].pld] = .taken;
             try stack.append(gpa, v);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .get_index => {
             try getIdx(&stack, gpa);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .set_index => {
             try setIdx(&stack, gpa);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .set_locl => {
             const curr = stack.items[frame_base + insts[pc].pld];
@@ -347,18 +435,18 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
 
             const val = stack.pop().?;
             stack.items[frame_base + insts[pc].pld] = val;
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .print => {
             const arg = stack.pop().?;
             defer arg.release(gpa);
             try vm.out.print("{f}\n", .{arg});
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .pop => {
             const v = stack.pop().?;
             defer v.release(gpa);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .pop_n => {
             const elms = stack.items[stack.items.len - insts[pc].pld ..];
@@ -366,12 +454,12 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
                 e.release(gpa);
             }
             stack.shrinkRetainingCapacity(stack.items.len - insts[pc].pld);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .jmp => {
             const v = insts[pc].pld;
             pc = v;
-            continue :loop trace(insts[pc].op, pc, stack.items);
+            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
         },
         .jmpf => {
             const val = stack.pop().?;
@@ -381,7 +469,7 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
             if (!val.truthy()) {
                 pc = target;
             }
-            continue :loop trace(insts[pc].op, pc, stack.items);
+            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
         },
         .jmpt => {
             const val = stack.pop().?;
@@ -391,7 +479,7 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
             if (val.truthy()) {
                 pc = target;
             }
-            continue :loop trace(insts[pc].op, pc, stack.items);
+            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
         },
         .ret => {
             const res = stack.pop().?;
@@ -405,7 +493,7 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
             const frame = call_stack.pop().?;
             frame_base = frame.saved_frame_base;
             pc = frame.ret_pc;
-            continue :loop trace(insts[pc].op, pc, stack.items);
+            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
         },
         .call => {
             const fn_idx = insts[pc].pld;
@@ -417,7 +505,7 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
 
             frame_base = stack.items.len - f.arity.?;
             pc = f.body.entry;
-            continue :loop trace(insts[pc].op, pc, stack.items);
+            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
         },
         .call_native => {
             const p: CallPayload = @bitCast(insts[pc].pld);
@@ -433,7 +521,7 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
             }
             stack.shrinkRetainingCapacity(stack.items.len - p.arity);
             try stack.append(gpa, r);
-            continue :loop trace(next(&pc, insts), pc, stack.items);
+            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
         },
         .halt => {
             break :loop;

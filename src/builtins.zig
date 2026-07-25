@@ -30,6 +30,7 @@ pub fn len(vm: *Vm, gpa: Allocator, args: []Value) NativeError!Value {
         .nil => 0,
         .str => |s| s.buffer.len,
         .arr => |a| a.elems.items.len,
+        .taken => unreachable,
     };
     return .{ .int = @intCast(l) };
 }

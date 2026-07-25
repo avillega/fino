@@ -24,6 +24,7 @@ const Tag = enum(u8) {
     dec_param,
     set_var,
     get_var,
+    take_var,
     neg_expr,
     not_expr,
     add_expr,
@@ -67,6 +68,7 @@ pub const Node = union(Tag) {
     dec_param: u24,
     set_var: u24,
     get_var: u24,
+    take_var: u24,
     neg_expr,
     not_expr,
     add_expr,
@@ -200,9 +202,23 @@ fn parseStmt(self: *Parser, gpa: Allocator) Error!void {
             if (self.peek.tag == .eql) {
                 const id = try self.parseIdentifier();
                 self.advanceTokens(); // eat the eql
+                const pos = self.nodes.items.len;
 
                 try self.parseExpr(gpa, 0);
                 try self.expectEndStmt();
+
+                var cnt: u32 = 0;
+                var replace: usize = 0;
+                for (self.nodes.items[pos..], pos..) |node, idx| {
+                    if (node == .get_var and node.get_var == id) {
+                        cnt += 1;
+                        replace = idx;
+                    }
+                }
+
+                if (cnt == 1) {
+                    self.nodes.items[replace] = .{ .take_var = id };
+                }
                 try self.addNode(gpa, .{ .set_var = id });
                 return;
             }
