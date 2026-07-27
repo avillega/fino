@@ -28,6 +28,7 @@ const Tag = enum(u8) {
     record_lit,
     dec_var,
     dec_param,
+    dec_capture,
     set_var,
     get_var,
     take_var,
@@ -63,6 +64,9 @@ const Tag = enum(u8) {
     while_begin,
     while_do,
     while_end,
+
+    for_do,
+    for_end,
 };
 
 pub const Node = union(Tag) {
@@ -74,6 +78,7 @@ pub const Node = union(Tag) {
     record_lit: u24, // number of pairs
     dec_var: u24,
     dec_param: u24,
+    dec_capture: u24,
     set_var: u24,
     get_var: u24,
     take_var: u24,
@@ -111,6 +116,9 @@ pub const Node = union(Tag) {
     while_do,
     while_end,
 
+    for_do,
+    for_end: u4, // number of captures
+
     pub fn VariantType(comptime tag: Tag) type {
         return @FieldType(@This(), @tagName(tag));
     }
@@ -121,6 +129,7 @@ const Error = error{
     UnfinishedStmt,
     TooManyArgs,
     InvalidAssignmentTarget,
+    TooManyCaptures,
 } || Allocator.Error || std.fmt.ParseIntError;
 
 pub fn init(gpa: Allocator, interner: *Interner) Parser {
@@ -281,6 +290,7 @@ fn parseStmt(self: *Parser) Error!void {
             try self.parseBlock();
             try self.addNode(.while_end);
         },
+        .kw_for => try self.parseFor(),
         else => {
             try self.parseExpr(0);
             try self.expectEndStmt();
@@ -324,6 +334,36 @@ fn parseBlock(self: *Parser) Error!void {
     try self.addNode(.{ .scope_end = decl_count });
 }
 
+fn parseFor(self: *Parser) Error!void {
+    try self.expectToken(.kw_for); // eat the 'for'
+    try self.expectToken(.oparen);
+
+    while (self.curr.tag == .sep) self.advanceTokens();
+    try self.parseExpr(0);
+    while (self.curr.tag == .sep) self.advanceTokens();
+    try self.expectToken(.cparen);
+    try self.addNode(.for_do);
+
+    try self.expectToken(.pipe);
+    var capts: u4 = 0;
+    while (capts < 2) { // only allow 1 or 2 captures
+        while (self.curr.tag == .sep) self.advanceTokens();
+        if (self.curr.tag == .pipe or self.curr.tag == .eof) break;
+        if (capts > 0) try self.expectToken(.comma);
+        const capture = try self.internToken(.identifier);
+        try self.addNode(.{ .dec_capture = capture });
+        capts += 1;
+    }
+    self.expectToken(.pipe) catch {
+        return error.TooManyCaptures;
+    };
+    std.debug.assert(capts <= 2);
+
+    while (self.curr.tag == .sep) self.advanceTokens();
+    try self.parseBlock();
+    try self.addNode(.{ .for_end = capts });
+}
+
 fn parseExpr(self: *Parser, min_prec: u16) Error!void {
     // left
     try self.parseFactor();
@@ -337,8 +377,6 @@ fn parseExpr(self: *Parser, min_prec: u16) Error!void {
     }
 }
 
-/// The node a binary operator produces and how tightly it binds; `null` for
-/// tokens that do not continue an expression.
 fn binOp(tag: Token.Tag) ?struct { node: Node, prec: u16 } {
     return switch (tag) {
         .eql_eql => .{ .node = .eql_expr, .prec = 40 },
@@ -867,6 +905,33 @@ test "parse: record" {
         .{ .str_lit = 3 },
         .{ .record_lit = 2 },
         .expr_stmt,
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+
+test "parse: for" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ for (record) |k, v| {
+        \\    print(k)   
+        \\ }
+    ;
+    var parser = Parser.init(gpa, &interner);
+    const ast = try parser.parse(src);
+    defer gpa.free(ast);
+    const expected = [_]Node{
+        .{ .get_var = 0 },
+        .for_do,
+        .{ .dec_capture = 1 },
+        .{ .dec_capture = 2 },
+        .scope_begin,
+        .{ .get_var = 1 },
+        .{ .call_expr = .{ .id = 3, .arg_c = 1 } },
+        .expr_stmt,
+        .{ .scope_end = 1 },
+        .{ .for_end = 2 },
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
 }

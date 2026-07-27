@@ -67,7 +67,10 @@ pub fn printAstTree(w: *Io.Writer, gpa: Allocator, src: [:0]const u8) !void {
     var stack: std.ArrayList(SubTree) = .empty;
 
     for (ast) |node| {
-        if (node == .scope_begin or node == .fn_begin or node == .while_begin) continue;
+        switch (node) {
+            .scope_begin, .fn_begin, .while_begin, .for_do => continue,
+            else => {},
+        }
         const a = displayArity(node);
 
         const first = stack.items.len - a;
@@ -110,6 +113,7 @@ fn writeLabel(w: *Io.Writer, interner: *Interner, n: Parser.Node) !void {
         .dec_param,
         .get_var,
         .take_var,
+        .dec_capture,
         => |i| try w.print("{t} {s}", .{ n, try interner.get_s(i) }),
         .str_lit => |i| try w.print("{t} \"{s}\"", .{ n, try interner.get_s(i) }),
         .atom => |i| try w.print("{t} :{s}", .{ n, try interner.get_s(i) }),
@@ -121,6 +125,7 @@ fn writeLabel(w: *Io.Writer, interner: *Interner, n: Parser.Node) !void {
         .if_end => try w.writeAll("if"),
         .while_do => try w.writeAll("cond"),
         .while_end => try w.writeAll("while"),
+        .for_end => try w.writeAll("for"),
         .arr_lit => try w.writeAll("array"),
         .record_lit => try w.writeAll("record"),
         else => |node| try w.print("{t}", .{node}),
@@ -138,6 +143,7 @@ inline fn displayArity(n: Parser.Node) u32 {
         .if_else,
         .str_lit,
         .atom,
+        .dec_capture,
         => 0,
         .set_var,
         .dec_var,
@@ -163,6 +169,7 @@ inline fn displayArity(n: Parser.Node) u32 {
         => 2,
         .call_expr => |c| c.arg_c,
         .if_end => |a| a,
+        .for_end => |f| f + 2,
         .fn_end => |f| f.arity + 1,
         .scope_end => |a| a,
         .arr_lit => |a| a,
@@ -201,6 +208,13 @@ test "printAstTree: every construct" {
         \\}
         \\var arr = [1, 2, 3]
         \\arr[1] = "hello"
+        \\for(arr) |v| {
+        \\  print(v)   
+        \\}
+        \\var record = .{:a "hello", :b "world"}
+        \\for(record) |k,v| {
+        \\  print(k, v)   
+        \\}
     ;
 
     const expected =
@@ -288,6 +302,28 @@ test "printAstTree: every construct" {
         \\set_index
         \\│ const_int 1
         \\│ str_lit "hello"
+        \\for
+        \\│ get_var arr
+        \\│ dec_capture v
+        \\│ block
+        \\│ │ expr_stmt
+        \\│ │ │ call print/1
+        \\│ │ │ │ get_var v
+        \\dec_var record
+        \\│ record
+        \\│ │ atom :a
+        \\│ │ str_lit "hello"
+        \\│ │ atom :b
+        \\│ │ str_lit "world"
+        \\for
+        \\│ get_var record
+        \\│ dec_capture k
+        \\│ dec_capture v
+        \\│ block
+        \\│ │ expr_stmt
+        \\│ │ │ call print/2
+        \\│ │ │ │ get_var k
+        \\│ │ │ │ get_var v
         \\
     ;
 

@@ -58,6 +58,7 @@ const Compiler = struct {
             const node = c.ast[c.i];
             c.i += 1;
             switch (node) {
+                .dec_capture, .for_do, .for_end => {},
                 .scope_end, .fn_end, .while_end, .while_do, .if_else, .if_end => {
                     c.i -= 1; // will be checked by the caller
                     return;
