@@ -50,8 +50,8 @@ pub fn loadBuiltins(self: *Program) !void {
 }
 
 pub fn run(prog: *Program, vm: *Vm, src: [:0]const u8) !void {
-    var parser: Parser = .init(src, &prog.interner);
-    const ast = parser.parse(prog.gpa) catch |err| {
+    var parser: Parser = .init(prog.gpa, &prog.interner);
+    const ast = parser.parse(src) catch |err| {
         const serr = parser.err orelse "";
         try vm.out.print("{t} {s}\n", .{ err, serr });
         return;
@@ -62,10 +62,8 @@ pub fn run(prog: *Program, vm: *Vm, src: [:0]const u8) !void {
     const start = try compiler.compile(prog, ast);
 
     vm.interpret(
-        prog.gpa,
         start,
         prog.insts.items,
-        &prog.interner,
         prog.fn_table.items,
     ) catch |e| {
         try vm.out.print("{s}\n", .{vm.err orelse ""});
@@ -76,16 +74,16 @@ pub fn run(prog: *Program, vm: *Vm, src: [:0]const u8) !void {
 }
 
 pub fn benchParser(prog: *Program, src: [:0]const u8) !void {
-    var parser: Parser = .init(src, &prog.interner);
-    const ast = try parser.parse(prog.gpa);
+    var parser: Parser = .init(prog.gpa, &prog.interner);
+    const ast = try parser.parse(src);
     defer prog.gpa.free(ast);
 
     _ = try compiler.compile(prog, ast);
 }
 
 pub fn printInsts(prog: *Program, w: *Io.Writer, src: [:0]const u8) !void {
-    var parser: Parser = .init(src, &prog.interner);
-    const ast = parser.parse(prog.gpa) catch |err| {
+    var parser: Parser = .init(prog.gpa, &prog.interner);
+    const ast = parser.parse(src) catch |err| {
         const serr = parser.err orelse "";
         try w.print("{t} {s}\n", .{ err, serr });
         return;
@@ -121,8 +119,8 @@ test "run: string litereral flow end-to-end" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\var s = "hello"
@@ -140,8 +138,8 @@ test "run: string literals concat" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\var s = "hello"
@@ -161,8 +159,8 @@ test "run: arrays append" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\var s = [1]
@@ -181,8 +179,8 @@ test "run: arrays concat" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\var s = [1]
@@ -202,8 +200,8 @@ test "run: arrays append to new array" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\var s = [1]
@@ -221,8 +219,8 @@ test "run: program state persists across runs" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     // functions and globals from earlier runs stay usable the repl scenario
     try prog.run(&vm, "fn add(a, b) { return a + b }");
@@ -238,8 +236,8 @@ test "run: array indexing" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\var x = [1, 2, 3]
@@ -256,8 +254,8 @@ test "run: array setting index" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\var x = [1, 2, 3]
@@ -281,8 +279,8 @@ test "run: must not leak" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\ var i = 0; while i < 1000 { var t = [i, i]; i = i + 1}
@@ -297,8 +295,8 @@ test "run: global array aliasing is invisible" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\ var a = [1, 2, 3]; var b = a; b[0] = 99; print(a[0], b[0])
@@ -313,8 +311,8 @@ test "run: local array aliasing is invisible" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\fn main() {
@@ -332,8 +330,8 @@ test "run: return heap allocatoted object" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\fn main() {
@@ -353,8 +351,8 @@ test "run: string equality" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\print("foo" + "bar" == "foobar")
@@ -369,8 +367,8 @@ test "run: array concatenation" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\var a = [1, 2, 3]
@@ -388,8 +386,8 @@ test "run: negative array indexes must fail" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try std.testing.expectError(
         error.IndexOutOfBounds,
@@ -407,8 +405,8 @@ test "run: setting array past its length must fail" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try std.testing.expectError(
         error.IndexOutOfBounds,
@@ -426,8 +424,8 @@ test "run: mutate function parameter" {
 
     var prog: Program = try .init(gpa);
     defer prog.deinit();
-    var vm: Vm = .init(&w);
-    defer vm.deinit(gpa);
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
 
     try prog.run(&vm,
         \\fn main(xs) {

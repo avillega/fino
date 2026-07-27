@@ -96,8 +96,8 @@ fn runFile(out: *Io.Writer, io: Io, gpa: std.mem.Allocator, file_path: []const u
 
     var prog: fino.Program = try .init(gpa);
     defer prog.deinit();
-    var vm: fino.Vm = .init(out);
-    defer vm.deinit(gpa);
+    var vm: fino.Vm = .init(out, gpa, &prog.interner);
+    defer vm.deinit();
 
     try runSrc(&prog, &vm, gpa, src, mode);
 }
@@ -132,8 +132,8 @@ fn runRepl(out: *Io.Writer, io: Io, gpa: std.mem.Allocator) !void {
     // session state: the growing compiled image plus the vm globals
     var prog: fino.Program = try .init(gpa);
     defer prog.deinit();
-    var vm: fino.Vm = .init(out);
-    defer vm.deinit(gpa);
+    var vm: fino.Vm = .init(out, gpa, &prog.interner);
+    defer vm.deinit();
 
     while (true) {
         try out.print("{s}> ", .{mode.prompt()});

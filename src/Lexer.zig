@@ -13,10 +13,12 @@ pub const Token = struct {
     pub const Tag = enum {
         oparen,
         cparen,
+        orecord, // closes with cbrace
         obrace,
         cbrace,
         obracket,
         cbracket,
+        pipe,
         eql,
         bang,
         comma,
@@ -44,7 +46,9 @@ pub const Token = struct {
         kw_if,
         kw_else,
         kw_while,
+        kw_for,
         str_lit,
+        atom,
         identifier,
         err,
         eof,
@@ -69,6 +73,7 @@ const keywords: std.StaticStringMap(Token.Tag) = .initComptime(.{
     .{ "if", .kw_if },
     .{ "else", .kw_else },
     .{ "while", .kw_while },
+    .{ "for", .kw_for },
 });
 
 fn identTag(lexeme: []const u8) Token.Tag {
@@ -85,6 +90,8 @@ pub fn next(self: *Lexer) Token {
         ident,
         integ,
         str,
+        orecord,
+        atom,
     };
 
     var start = self.curr;
@@ -101,8 +108,22 @@ pub fn next(self: *Lexer) Token {
                     start += 1;
                     continue :sw .start;
                 },
+                '#' => {
+                    // comments
+                    while (true) {
+                        self.curr += 1;
+                        start += 1;
+                        const t = self.src[self.curr];
+                        if (t == 0 or t == '\n') break;
+                    }
+                    continue :sw .start;
+                },
                 '\n', ';' => {
                     tag = .sep;
+                },
+                '.' => {
+                    self.curr += 1;
+                    continue :sw .orecord;
                 },
                 '{' => {
                     tag = .obrace;
@@ -115,6 +136,15 @@ pub fn next(self: *Lexer) Token {
                 },
                 ')' => {
                     tag = .cparen;
+                },
+                '[' => {
+                    tag = .obracket;
+                },
+                ']' => {
+                    tag = .cbracket;
+                },
+                '|' => {
+                    tag = .pipe;
                 },
                 ',' => {
                     tag = .comma;
@@ -133,12 +163,6 @@ pub fn next(self: *Lexer) Token {
                 },
                 '%' => {
                     tag = .mod;
-                },
-                '[' => {
-                    tag = .obracket;
-                },
-                ']' => {
-                    tag = .cbracket;
                 },
                 '=' => {
                     self.curr += 1;
@@ -160,6 +184,10 @@ pub fn next(self: *Lexer) Token {
                     self.curr += 1;
                     continue :sw .str;
                 },
+                ':' => {
+                    self.curr += 1;
+                    continue :sw .atom;
+                },
                 'a'...'z', 'A'...'Z', '_' => {
                     self.curr += 1;
                     continue :sw .ident;
@@ -175,6 +203,24 @@ pub fn next(self: *Lexer) Token {
 
             self.curr += 1;
             return .{ .tag = tag, .start = start, .end = self.curr };
+        },
+        .orecord => {
+            if (self.matchCurr('{')) {
+                return .{ .tag = .orecord, .start = start, .end = self.curr };
+            } else {
+                return .{ .tag = .err, .start = 0, .end = 0 };
+            }
+        },
+        .atom => {
+            switch (self.src[self.curr]) {
+                'a'...'z', 'A'...'Z', '0'...'9', '_' => {
+                    self.curr += 1;
+                    continue :sw .atom;
+                },
+                else => {},
+            }
+
+            return .{ .tag = .atom, .start = start + 1, .end = self.curr };
         },
         .eql => {
             const tag: Token.Tag = if (self.matchCurr('=')) .eql_eql else .eql;
@@ -246,7 +292,13 @@ pub fn printTokens(w: *Io.Writer, lexer: *Lexer) !void {
     while (true) {
         const t = lexer.next();
         switch (t.tag) {
-            .sep => try w.print("sep \"{c}\"\n", .{lexer.src[t.start]}),
+            .sep => {
+                if (lexer.src[t.start] == '\n') {
+                    try w.print("sep \"\\n\"\n", .{});
+                } else {
+                    try w.print("sep \";\"\n", .{});
+                }
+            },
             else => try w.print("{t} \"{s}\"\n", .{ t.tag, t.lexeme(lexer.src) }),
         }
         if (t.tag == .eof) break;
@@ -468,6 +520,28 @@ test "lex array literal" {
     try expectToken(src, lex.next(), .comma, ",");
     try expectToken(src, lex.next(), .identifier, "z");
     try expectToken(src, lex.next(), .cbracket, "]");
+    try t.expectEqual(.sep, lex.next().tag);
+    try t.expectEqual(.eof, lex.next().tag);
+}
+
+test "for lexing" {
+    const t = std.testing;
+    const src =
+        \\ for (a) |k, v| {}
+        \\
+    ;
+    var lex = Lexer.init(src);
+    try expectToken(src, lex.next(), .kw_for, "for");
+    try expectToken(src, lex.next(), .oparen, "(");
+    try expectToken(src, lex.next(), .identifier, "a");
+    try expectToken(src, lex.next(), .cparen, ")");
+    try expectToken(src, lex.next(), .pipe, "|");
+    try expectToken(src, lex.next(), .identifier, "k");
+    try expectToken(src, lex.next(), .comma, ",");
+    try expectToken(src, lex.next(), .identifier, "v");
+    try expectToken(src, lex.next(), .pipe, "|");
+    try expectToken(src, lex.next(), .obrace, "{");
+    try expectToken(src, lex.next(), .cbrace, "}");
     try t.expectEqual(.sep, lex.next().tag);
     try t.expectEqual(.eof, lex.next().tag);
 }

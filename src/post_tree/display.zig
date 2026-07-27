@@ -18,8 +18,8 @@ pub fn printTokens(w: *Io.Writer, src: [:0]const u8) !void {
 pub fn printAstSize(w: *Io.Writer, gpa: Allocator, src: [:0]const u8) !void {
     var interner: Interner = .init(gpa);
     defer interner.deinit();
-    var parser: Parser = .init(src, &interner);
-    const ast = try parser.parse(gpa);
+    var parser: Parser = .init(gpa, &interner);
+    const ast = try parser.parse(src);
     defer gpa.free(ast);
 
     const bytes = ast.len * @sizeOf(Parser.Node);
@@ -31,8 +31,8 @@ pub fn printAstFlat(w: *Io.Writer, gpa: Allocator, src: [:0]const u8) !void {
     defer w.flush() catch unreachable;
     var interner: Interner = .init(gpa);
     defer interner.deinit();
-    var parser: Parser = .init(src, &interner);
-    const ast = parser.parse(gpa) catch |err| {
+    var parser: Parser = .init(gpa, &interner);
+    const ast = parser.parse(src) catch |err| {
         const serr = parser.err orelse "";
         try w.print("{t} {s}\n", .{ err, serr });
         try w.print("printing partial parsed list\n", .{});
@@ -51,8 +51,10 @@ pub fn printAstTree(w: *Io.Writer, gpa: Allocator, src: [:0]const u8) !void {
 
     var interner: Interner = .init(gpa);
     defer interner.deinit();
-    var parser: Parser = .init(src, &interner);
-    const ast = parser.parse(alloc) catch |err| {
+    // the ast and the sub trees below are never freed individually, the arena
+    // takes care of them
+    var parser: Parser = .init(alloc, &interner);
+    const ast = parser.parse(src) catch |err| {
         const serr = parser.err orelse "";
         try w.print("{t} {s}\n", .{ err, serr });
         try w.print("printing partial parsed list\n", .{});
@@ -110,6 +112,7 @@ fn writeLabel(w: *Io.Writer, interner: *Interner, n: Parser.Node) !void {
         .take_var,
         => |i| try w.print("{t} {s}", .{ n, try interner.get_s(i) }),
         .str_lit => |i| try w.print("{t} \"{s}\"", .{ n, try interner.get_s(i) }),
+        .atom => |i| try w.print("{t} :{s}", .{ n, try interner.get_s(i) }),
         .fn_end => |f| try w.print("fn {s}", .{try interner.get_s(f.id)}),
         .scope_end => try w.print("block", .{}),
         .call_expr => |c| try w.print("call {s}/{d}", .{ try interner.get_s(c.id), c.arg_c }),
@@ -119,6 +122,7 @@ fn writeLabel(w: *Io.Writer, interner: *Interner, n: Parser.Node) !void {
         .while_do => try w.writeAll("cond"),
         .while_end => try w.writeAll("while"),
         .arr_lit => try w.writeAll("array"),
+        .record_lit => try w.writeAll("record"),
         else => |node| try w.print("{t}", .{node}),
     }
 }
@@ -133,6 +137,7 @@ inline fn displayArity(n: Parser.Node) u32 {
         .if_then,
         .if_else,
         .str_lit,
+        .atom,
         => 0,
         .set_var,
         .dec_var,
@@ -161,6 +166,7 @@ inline fn displayArity(n: Parser.Node) u32 {
         .fn_end => |f| f.arity + 1,
         .scope_end => |a| a,
         .arr_lit => |a| a,
+        .record_lit => |r| 2 * r,
         else => |node| std.debug.panic("unknown arity for {t}", .{node}),
     };
 }

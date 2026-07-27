@@ -52,13 +52,13 @@ pub fn intern_i(self: *Interner, i: i64) !u24 {
     return gop.value_ptr.*;
 }
 
-pub fn get_s(self: *Interner, id: u24) ![]const u8 {
+pub fn get_s(self: *const Interner, id: u24) ![]const u8 {
     if (id >= self.strings.items.len) return error.StringDoesNotExists;
 
     return self.strings.items[id];
 }
 
-pub fn get_i(self: *Interner, id: u24) !i64 {
+pub fn get_i(self: *const Interner, id: u24) !i64 {
     if (id >= self.consts.items.len) return error.ConstDoesNotExists;
 
     return self.consts.items[id];

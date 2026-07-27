@@ -4,11 +4,7 @@ const Interner = @import("Interner.zig");
 const builtins = @import("builtins.zig");
 
 const Vm = @This();
-const Error = error{RuntimeError};
-
-out: *std.Io.Writer,
-globals: std.array_hash_map.Auto(u24, Value),
-err: ?[]const u8,
+const Error = error{RuntimeError} || Allocator.Error;
 
 pub const CallPayload = packed struct(u24) {
     fn_idx: u16,
@@ -51,47 +47,125 @@ const ArrayObj = struct {
     }
 };
 
+const RecordObj = struct {
+    rc: u32,
+    map: std.array_hash_map.Auto(u24, Value),
+
+    pub fn ensureUnique(r: *RecordObj, gpa: Allocator) !*RecordObj {
+        std.debug.assert(r.rc != 0);
+        if (r.rc == 1) return r;
+
+        for (r.map.values()) |v| {
+            v.retain();
+        }
+
+        const map: std.array_hash_map.Auto(u24, Value) = try .init(
+            gpa,
+            r.map.keys(),
+            r.map.values(),
+        );
+        const new_r = try gpa.create(RecordObj);
+        new_r.* = .{
+            .rc = 1,
+            .map = map,
+        };
+        r.rc -= 1;
+        return new_r;
+    }
+};
+
 pub const Value = union(enum) {
     nil,
     taken,
     int: i64,
+    atom: u24,
     str: *StrObj,
     arr: *ArrayObj,
+    rec: *RecordObj,
 
-    pub fn format(
-        v: @This(),
-        w: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        switch (v) {
-            .nil => try w.writeAll("nil"),
-            .taken => try w.writeAll("<taken>"),
-            .int => |i| try w.print("{d}", .{i}),
-            .str => |s| try w.writeAll(s.buffer),
-            .arr => |a| {
-                try w.writeByte('[');
-                var cnt: u32 = 0;
-                for (a.elems.items) |e| {
-                    if (cnt > 0) try w.writeAll(", ");
-                    cnt += 1;
-                    try w.print("{f}", .{e});
-                }
-                try w.writeByte(']');
-            },
-        }
+    pub fn fmt(v: Value, interner: *const Interner) FmtValue {
+        return .{ .v = v, .interner = interner };
     }
+
+    pub const FmtValue = struct {
+        v: Value,
+        interner: *const Interner,
+
+        pub fn format(
+            self: @This(),
+            w: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            switch (self.v) {
+                .nil => try w.writeAll("nil"),
+                .taken => try w.writeAll("<taken>"),
+                .int => |i| try w.print("{d}", .{i}),
+                .atom => |id| try w.print(":{s}", .{self.interner.get_s(id) catch "?"}),
+                .str => |s| try w.writeAll(s.buffer),
+                .arr => |a| {
+                    try w.writeByte('[');
+                    for (a.elems.items, 0..) |e, i| {
+                        if (i > 0) try w.writeAll(", ");
+                        try w.print("{f}", .{e.fmt(self.interner)});
+                    }
+                    try w.writeByte(']');
+                },
+                .rec => |r| {
+                    try w.writeAll(".{");
+                    for (r.map.keys(), r.map.values(), 0..) |k, e, i| {
+                        if (i > 0) try w.writeAll(", ");
+                        try w.print(":{s} {f}", .{
+                            self.interner.get_s(k) catch "?",
+                            e.fmt(self.interner),
+                        });
+                    }
+                    try w.writeByte('}');
+                },
+            }
+        }
+    };
 
     pub inline fn truthy(v: Value) bool {
         return switch (v) {
             .taken => unreachable,
             .nil => false,
-            .int => |i| if (i == 0) return false else true,
+            .int => |i| i != 0,
             else => true,
+        };
+    }
+
+    pub fn eql(a: Value, b: Value) bool {
+        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+        return switch (a) {
+            .taken => unreachable,
+            .nil => true,
+            .int => a.int == b.int,
+            .atom => a.atom == b.atom,
+            .str => |s| s == b.str or std.mem.eql(u8, s.buffer, b.str.buffer),
+            .arr => |x| {
+                const y = b.arr;
+                if (x == y) return true;
+                if (x.elems.items.len != y.elems.items.len) return false;
+                for (x.elems.items, y.elems.items) |i, j| {
+                    if (!i.eql(j)) return false;
+                }
+                return true;
+            },
+            .rec => |x| {
+                const y = b.rec;
+                if (x == y) return true;
+                if (x.map.count() != y.map.count()) return false;
+                for (x.map.keys(), x.map.values()) |k, v| {
+                    const other = y.map.get(k) orelse return false;
+                    if (!v.eql(other)) return false;
+                }
+                return true;
+            },
         };
     }
 
     pub fn release(v: Value, gpa: Allocator) void {
         switch (v) {
-            .nil, .int, .taken => {},
+            .nil, .int, .taken, .atom => {},
             .str => |s| {
                 s.rc -= 1;
                 if (s.rc == 0) {
@@ -109,19 +183,25 @@ pub const Value = union(enum) {
                     gpa.destroy(a);
                 }
             },
+            .rec => |r| {
+                r.rc -= 1;
+                if (r.rc == 0) {
+                    for (r.map.values()) |e| {
+                        e.release(gpa);
+                    }
+                    r.map.deinit(gpa);
+                    gpa.destroy(r);
+                }
+            },
         }
     }
 
     pub fn retain(v: Value) Value {
         switch (v) {
-            .nil, .int, .taken => {},
-            .str => |s| {
-                std.debug.assert(s.rc != 0);
-                s.rc += 1;
-            },
-            .arr => |a| {
-                std.debug.assert(a.rc != 0);
-                a.rc += 1;
+            .nil, .int, .taken, .atom => {},
+            inline .str, .arr, .rec => |o| {
+                std.debug.assert(o.rc != 0);
+                o.rc += 1;
             },
         }
         return v;
@@ -137,8 +217,10 @@ pub const Inst = packed struct(u32) {
     pub const Op = enum(u8) {
         nil,
         const_int,
+        atom,
         str_lit,
         arr_lit,
+        record_lit,
         pop,
         pop_n,
         neg,
@@ -177,21 +259,22 @@ pub const Inst = packed struct(u32) {
         i: @This(),
         w: *std.Io.Writer,
         vm: Vm,
-        interner: Interner,
     ) std.Io.Writer.Error!void {
         switch (i.op) {
-            .const_int => try w.print("{t} {d}", .{ i.op, interner.consts.items[i.pld] }),
-            .str_lit => try w.print("{t} {s}", .{ i.op, interner.strings.items[i.pld] }),
-            .dec_glob => try w.print("{t} {s}", .{ i.op, interner.strings.items[i.pld] }),
+            .const_int => try w.print("{t} {d}", .{ i.op, vm.interner.consts.items[i.pld] }),
+            .str_lit => try w.print("{t} \"{s}\"", .{ i.op, vm.interner.strings.items[i.pld] }),
+            .atom => try w.print("{t} :{s}", .{ i.op, vm.interner.strings.items[i.pld] }),
+            .dec_glob => try w.print("{t} {s}", .{ i.op, vm.interner.strings.items[i.pld] }),
             .set_glob,
             .put_glob,
             .get_glob,
             .take_glob,
-            => try w.print("{t} {f}", .{ i.op, vm.globals.get(i.pld).? }),
+            => try w.print("{t} {f}", .{ i.op, vm.globals.get(i.pld).?.fmt(vm.interner) }),
             .set_locl,
             .get_locl,
             .take_locl,
             .arr_lit,
+            .record_lit,
             .pop_n,
             .jmp,
             .jmpf,
@@ -229,30 +312,58 @@ pub const Inst = packed struct(u32) {
     }
 };
 
-pub fn init(w: *std.Io.Writer) Vm {
-    return .{ .out = w, .globals = .empty, .err = null };
+out: *std.Io.Writer,
+gpa: Allocator,
+interner: *const Interner,
+globals: std.array_hash_map.Auto(u24, Value),
+stack: std.ArrayList(Value),
+err: ?[]const u8,
+
+pub fn init(w: *std.Io.Writer, gpa: Allocator, interner: *const Interner) Vm {
+    return .{
+        .out = w,
+        .interner = interner,
+        .gpa = gpa,
+        .stack = .empty,
+        .globals = .empty,
+        .err = null,
+    };
 }
 
-pub fn deinit(self: *Vm, gpa: std.mem.Allocator) void {
-    for (self.globals.entries.items(.value)) |entry| {
-        entry.release(gpa);
+pub fn deinit(self: *Vm) void {
+    for (self.stack.items) |*v| {
+        v.release(self.gpa);
     }
-    self.globals.deinit(gpa);
+    self.stack.deinit(self.gpa);
+    for (self.globals.values()) |value| {
+        value.release(self.gpa);
+    }
+    self.globals.deinit(self.gpa);
+    if (self.err) |err| self.gpa.free(err);
+}
+
+fn fail(vm: *Vm, comptime format: []const u8, args: anytype) Error {
+    vm.err = try std.fmt.allocPrint(vm.gpa, format, args);
+    return Error.RuntimeError;
+}
+
+fn nameOf(vm: *Vm, id: u24) []const u8 {
+    return vm.interner.get_s(id) catch "?";
 }
 
 const trace_enabled = false;
 
-inline fn trace(inst: Inst, pc: usize, vm: *Vm, interner: *Interner, stack: []const Value) Inst.Op {
+inline fn trace(vm: *Vm, inst: Inst, pc: usize) Inst.Op {
     if (comptime trace_enabled) {
         var buf: [256]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
-        inst.debugPrint(&writer, vm.*, interner.*) catch {};
+        inst.debugPrint(&writer, vm.*) catch {};
 
         const inst_str = buf[0..writer.end];
         std.debug.print("{d:>4}: {s:<10} [", .{ pc, inst_str });
-        for (stack, 0..) |v, i| {
+        for (vm.stack.items, 0..) |v, i| {
             if (i != 0) std.debug.print(", ", .{});
-            std.debug.print("{f}", .{v});
+            std.debug.print("{f}", .{v.fmt(vm.interner)});
         }
         std.debug.print("]\n", .{});
     }
@@ -260,19 +371,11 @@ inline fn trace(inst: Inst, pc: usize, vm: *Vm, interner: *Interner, stack: []co
     return inst.op;
 }
 
-pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, interner: *Interner, fns: []FnInfo) !void {
+pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
     if (insts.len <= 0) return;
 
-    var stack: std.ArrayList(Value) = .empty;
-    defer {
-        for (stack.items) |*v| {
-            v.release(gpa);
-        }
-        stack.deinit(gpa);
-    }
-
     var call_stack: std.ArrayList(Frame) = .empty;
-    defer call_stack.deinit(gpa);
+    defer call_stack.deinit(vm.gpa);
 
     const next = struct {
         inline fn op(p: *usize, is: []const Inst) Inst {
@@ -284,244 +387,233 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
     var pc: usize = start;
     var frame_base: usize = 0;
 
-    loop: switch (trace(insts[pc], pc, vm, interner, stack.items)) {
+    loop: switch (vm.trace(insts[pc], pc)) {
         .nil => {
-            try stack.append(gpa, .nil);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.stack.append(vm.gpa, .nil);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .const_int => {
-            const v = interner.consts.items[insts[pc].pld];
-            try stack.append(gpa, .{ .int = v });
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            const v = vm.interner.consts.items[insts[pc].pld];
+            try vm.stack.append(vm.gpa, .{ .int = v });
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .atom => {
+            try vm.stack.append(vm.gpa, .{ .atom = insts[pc].pld });
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .str_lit => {
-            const s = interner.strings.items[insts[pc].pld];
-            const str = try gpa.create(StrObj);
+            const s = vm.interner.strings.items[insts[pc].pld];
+            const str = try vm.gpa.create(StrObj);
             str.* = .{
                 .rc = 1,
-                .buffer = try gpa.dupe(u8, s),
+                .buffer = try vm.gpa.dupe(u8, s),
             };
-            try stack.append(gpa, .{ .str = str });
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.stack.append(vm.gpa, .{ .str = str });
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .arr_lit => {
             const n = insts[pc].pld;
-            const src_e = stack.items[stack.items.len - n ..];
-            const elems = try gpa.dupe(Value, src_e);
-            stack.shrinkRetainingCapacity(stack.items.len - n);
-            const arr = try gpa.create(ArrayObj);
+            const src_e = vm.stack.items[vm.stack.items.len - n ..];
+            const elems = try vm.gpa.dupe(Value, src_e);
+            vm.stack.shrinkRetainingCapacity(vm.stack.items.len - n);
+            const arr = try vm.gpa.create(ArrayObj);
             arr.* = ArrayObj{ .rc = 1, .elems = .fromOwnedSlice(elems) };
-            try stack.append(gpa, .{ .arr = arr });
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.stack.append(vm.gpa, .{ .arr = arr });
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .record_lit => {
+            const pairs = insts[pc].pld;
+            const src_e = vm.stack.items[vm.stack.items.len - (2 * pairs) ..];
+
+            const rec = try vm.gpa.create(RecordObj);
+            rec.* = RecordObj{ .rc = 1, .map = .empty };
+            try rec.map.ensureTotalCapacity(vm.gpa, pairs);
+            for (0..pairs) |i| {
+                const ki = i * 2;
+                const vi = (i * 2) + 1;
+                const k = src_e[ki];
+                std.debug.assert(k == .atom);
+                rec.map.putAssumeCapacity(k.atom, src_e[vi]);
+            }
+            vm.stack.shrinkRetainingCapacity(vm.stack.items.len - (2 * pairs));
+            try vm.stack.append(vm.gpa, .{ .rec = rec });
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         inline .neg, .not => |op| {
-            try unop(&stack, gpa, op);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.unop(op);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         inline .add, .sub, .mul, .div, .eql, .lt, .gt => |op| {
-            try binop(&stack, gpa, op);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.binop(op);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .dec_glob => {
             const id = insts[pc].pld;
             if (vm.globals.contains(id)) {
-                vm.err = try std.fmt.allocPrint(
-                    gpa,
-                    "error: Gloabal redeclaration {s}",
-                    .{interner.get_s(id) catch "unknown"},
-                );
-                return Error.RuntimeError;
+                return vm.fail("global redeclaration {s}", .{vm.nameOf(id)});
             }
 
-            const val = stack.pop().?;
-            try vm.globals.put(gpa, insts[pc].pld, val);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            const val = vm.stack.pop().?;
+            try vm.globals.put(vm.gpa, insts[pc].pld, val);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .get_glob => {
-            // add err field to the vm and print the variable that does not exists
             const val = vm.globals.get(insts[pc].pld) orelse return Error.RuntimeError;
             if (val == .taken) {
-                vm.err = try std.fmt.allocPrint(
-                    gpa,
-                    "global {s} was moved and can not be used\n",
-                    .{try interner.get_s(insts[pc].pld)},
-                );
-                return error.RuntimeError;
+                return vm.fail("global {s} was moved and can not be used", .{vm.nameOf(insts[pc].pld)});
             }
-            try stack.append(gpa, val.retain());
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.stack.append(vm.gpa, val.retain());
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .take_glob => {
             const val = vm.globals.getPtr(insts[pc].pld) orelse return Error.RuntimeError;
             if (val.* == .taken) {
-                vm.err = try std.fmt.allocPrint(
-                    gpa,
-                    "global {s} was moved and can not be used\n",
-                    .{try interner.get_s(insts[pc].pld)},
-                );
-                return error.RuntimeError;
+                return vm.fail("global {s} was moved and can not be used", .{vm.nameOf(insts[pc].pld)});
             }
-            try stack.append(gpa, val.*);
+            try vm.stack.append(vm.gpa, val.*);
             val.* = .taken;
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .set_glob => {
             const id = insts[pc].pld;
-            const old = vm.globals.getPtr(id) orelse {
-                vm.err = try std.fmt.allocPrint(
-                    gpa,
-                    "global {s} does not exists\n",
-                    .{try interner.get_s(insts[pc].pld)},
-                );
-                return Error.RuntimeError;
-            };
+            const old = vm.globals.getPtr(id) orelse
+                return vm.fail("global {s} does not exist", .{vm.nameOf(id)});
 
             if (old.* == .taken) {
-                vm.err = try std.fmt.allocPrint(
-                    gpa,
-                    "attempting to write back to taken global {s}\n",
-                    .{try interner.get_s(insts[pc].pld)},
-                );
-                return Error.RuntimeError;
+                return vm.fail("attempting to write back to taken global {s}", .{vm.nameOf(id)});
             }
 
-            old.release(gpa);
+            old.release(vm.gpa);
 
-            const val = stack.pop().?;
+            const val = vm.stack.pop().?;
             old.* = val;
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .put_glob => {
             const id = insts[pc].pld;
-            const old = vm.globals.getPtr(id) orelse {
-                vm.err = try std.fmt.allocPrint(
-                    gpa,
-                    "global {s} does not exists\n",
-                    .{try interner.get_s(insts[pc].pld)},
-                );
-                return Error.RuntimeError;
-            };
+            const old = vm.globals.getPtr(id) orelse
+                return vm.fail("global {s} does not exist", .{vm.nameOf(id)});
 
             std.debug.assert(old.* == .taken);
-            const val = stack.pop().?;
+            const val = vm.stack.pop().?;
             old.* = val;
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .get_locl => {
-            const v = stack.items[frame_base + insts[pc].pld];
+            const v = vm.stack.items[frame_base + insts[pc].pld];
             std.debug.assert(v != .taken);
-            try stack.append(gpa, v.retain());
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.stack.append(vm.gpa, v.retain());
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .take_locl => {
-            const v = stack.items[frame_base + insts[pc].pld];
+            const v = vm.stack.items[frame_base + insts[pc].pld];
             std.debug.assert(v != .taken);
 
-            stack.items[frame_base + insts[pc].pld] = .taken;
-            try stack.append(gpa, v);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            vm.stack.items[frame_base + insts[pc].pld] = .taken;
+            try vm.stack.append(vm.gpa, v);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .get_index => {
-            try getIdx(&stack, gpa);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.getIdx();
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .set_index => {
-            try setIdx(&stack, gpa);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            try vm.setIdx();
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .set_locl => {
-            const curr = stack.items[frame_base + insts[pc].pld];
-            curr.release(gpa);
+            const curr = vm.stack.items[frame_base + insts[pc].pld];
+            curr.release(vm.gpa);
 
-            const val = stack.pop().?;
-            stack.items[frame_base + insts[pc].pld] = val;
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            const val = vm.stack.pop().?;
+            vm.stack.items[frame_base + insts[pc].pld] = val;
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .print => {
-            const arg = stack.pop().?;
-            defer arg.release(gpa);
-            try vm.out.print("{f}\n", .{arg});
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            const arg = vm.stack.pop().?;
+            defer arg.release(vm.gpa);
+            try vm.out.print("{f}\n", .{arg.fmt(vm.interner)});
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .pop => {
-            const v = stack.pop().?;
-            defer v.release(gpa);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            const v = vm.stack.pop().?;
+            defer v.release(vm.gpa);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .pop_n => {
-            const elms = stack.items[stack.items.len - insts[pc].pld ..];
+            const elms = vm.stack.items[vm.stack.items.len - insts[pc].pld ..];
             for (elms) |e| {
-                e.release(gpa);
+                e.release(vm.gpa);
             }
-            stack.shrinkRetainingCapacity(stack.items.len - insts[pc].pld);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            vm.stack.shrinkRetainingCapacity(vm.stack.items.len - insts[pc].pld);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .jmp => {
             const v = insts[pc].pld;
             pc = v;
-            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
+            continue :loop vm.trace(insts[pc], pc);
         },
         .jmpf => {
-            const val = stack.pop().?;
-            defer val.release(gpa);
+            const val = vm.stack.pop().?;
+            defer val.release(vm.gpa);
             const target = insts[pc].pld;
             pc += 1;
             if (!val.truthy()) {
                 pc = target;
             }
-            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
+            continue :loop vm.trace(insts[pc], pc);
         },
         .jmpt => {
-            const val = stack.pop().?;
-            defer val.release(gpa);
+            const val = vm.stack.pop().?;
+            defer val.release(vm.gpa);
             const target = insts[pc].pld;
             pc += 1;
             if (val.truthy()) {
                 pc = target;
             }
-            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
+            continue :loop vm.trace(insts[pc], pc);
         },
         .ret => {
-            const res = stack.pop().?;
-            const elms = stack.items[frame_base..];
+            const res = vm.stack.pop().?;
+            const elms = vm.stack.items[frame_base..];
             for (elms) |e| {
-                e.release(gpa);
+                e.release(vm.gpa);
             }
-            stack.shrinkRetainingCapacity(frame_base);
-            try stack.append(gpa, res);
+            vm.stack.shrinkRetainingCapacity(frame_base);
+            try vm.stack.append(vm.gpa, res);
 
             const frame = call_stack.pop().?;
             frame_base = frame.saved_frame_base;
             pc = frame.ret_pc;
-            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
+            continue :loop vm.trace(insts[pc], pc);
         },
         .call => {
             const fn_idx = insts[pc].pld;
             const f = fns[fn_idx];
-            try call_stack.append(gpa, .{
+            try call_stack.append(vm.gpa, .{
                 .saved_frame_base = frame_base,
                 .ret_pc = pc + 1,
             });
 
-            frame_base = stack.items.len - f.arity.?;
+            frame_base = vm.stack.items.len - f.arity.?;
             pc = f.body.entry;
-            continue :loop trace(insts[pc], pc, vm, interner, stack.items);
+            continue :loop vm.trace(insts[pc], pc);
         },
         .call_native => {
             const p: CallPayload = @bitCast(insts[pc].pld);
-            const args = stack.items[stack.items.len - p.arity ..];
+            const args = vm.stack.items[vm.stack.items.len - p.arity ..];
             const f = fns[p.fn_idx];
 
             if (f.arity) |arity| {
                 if (arity != p.arity) return error.WrongNumbertOfArgs;
             }
-            const r = try f.body.native(vm, gpa, args);
+            const r = try f.body.native(vm, args);
             for (args) |a| {
-                a.release(gpa);
+                a.release(vm.gpa);
             }
-            stack.shrinkRetainingCapacity(stack.items.len - p.arity);
-            try stack.append(gpa, r);
-            continue :loop trace(next(&pc, insts), pc, vm, interner, stack.items);
+            vm.stack.shrinkRetainingCapacity(vm.stack.items.len - p.arity);
+            try vm.stack.append(vm.gpa, r);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .halt => {
             break :loop;
@@ -529,132 +621,113 @@ pub fn interpret(vm: *Vm, gpa: std.mem.Allocator, start: usize, insts: []Inst, i
     }
 }
 
-inline fn getIdx(stack: *std.ArrayList(Value), gpa: std.mem.Allocator) !void {
-    const idx = stack.pop().?;
-    const target = stack.pop().?;
+inline fn getIdx(vm: *Vm) !void {
+    const idx = vm.stack.pop().?;
+    const target = vm.stack.pop().?;
     defer {
-        idx.release(gpa);
-        target.release(gpa);
+        idx.release(vm.gpa);
+        target.release(vm.gpa);
     }
 
     if (idx != .int) return error.IdxMustBeInt;
     const i = idx.int;
     switch (target) {
-        .str => {
-            return error.Nyi; // TODO: support chars/bytes?
-        },
+        .str => return error.Nyi, // TODO: support chars/bytes?
         .arr => |a| {
             if (i < 0 or i >= a.elems.items.len) return error.IndexOutOfBounds;
-            try stack.append(gpa, a.elems.items[@intCast(i)].retain());
+            try vm.stack.append(vm.gpa, a.elems.items[@intCast(i)].retain());
         },
         else => return error.TargetMustBeIndexable,
     }
 }
 
-inline fn setIdx(stack: *std.ArrayList(Value), gpa: std.mem.Allocator) !void {
-    const arr = stack.pop().?;
-    const val = stack.pop().?;
-    const idx = stack.pop().?;
+inline fn setIdx(vm: *Vm) !void {
+    const arr = vm.stack.pop().?;
+    const val = vm.stack.pop().?;
+    const idx = vm.stack.pop().?;
     defer {
-        idx.release(gpa);
+        idx.release(vm.gpa);
     }
     errdefer {
-        arr.release(gpa);
-        val.release(gpa);
+        arr.release(vm.gpa);
+        val.release(vm.gpa);
     }
 
     if (arr != .arr) return error.TargetMustBeIndexable;
     if (idx != .int) return error.IdxMustBeInt;
     if (idx.int < 0 or idx.int >= arr.arr.elems.items.len) return error.IndexOutOfBounds;
+    const i: usize = @intCast(idx.int);
 
-    var x = try arr.arr.ensureUnique(gpa);
-    x.elems.items[@bitCast(idx.int)].release(gpa);
-    x.elems.items[@bitCast(idx.int)] = val;
-    try stack.append(gpa, .{ .arr = x });
+    const x = try arr.arr.ensureUnique(vm.gpa);
+    x.elems.items[i].release(vm.gpa);
+    x.elems.items[i] = val;
+    try vm.stack.append(vm.gpa, .{ .arr = x });
 }
 
-inline fn binop(stack: *std.ArrayList(Value), gpa: std.mem.Allocator, comptime op: Inst.Op) !void {
-    var b = stack.pop().?;
-    var a = stack.pop().?;
-    defer a.release(gpa);
-    defer b.release(gpa);
+inline fn binop(vm: *Vm, comptime op: Inst.Op) !void {
+    var b = vm.stack.pop().?;
+    var a = vm.stack.pop().?;
+    defer a.release(vm.gpa);
+    defer b.release(vm.gpa);
 
-    const value: Value = sw: switch (op) {
-        .add => {
+    if (a == .int and b == .int) {
+        const r: i64 = switch (op) {
+            .add => a.int + b.int,
+            .sub => a.int - b.int,
+            .mul => a.int * b.int,
+            .div => @divFloor(a.int, b.int),
+            .eql => @intFromBool(a.int == b.int),
+            .lt => @intFromBool(a.int < b.int),
+            .gt => @intFromBool(a.int > b.int),
+            else => @compileError("binary op called without an binary operation"),
+        };
+        return vm.stack.append(vm.gpa, .{ .int = r });
+    }
+
+    const value: Value = switch (op) {
+        .add => blk: {
             if (a == .str and b == .str) {
-                const s = try std.fmt.allocPrint(gpa, "{s}{s}", .{ a.str.buffer, b.str.buffer });
-                const str = try gpa.create(StrObj);
+                const s = try std.fmt.allocPrint(vm.gpa, "{s}{s}", .{ a.str.buffer, b.str.buffer });
+                const str = try vm.gpa.create(StrObj);
                 str.* = .{
                     .rc = 1,
                     .buffer = s,
                 };
-                break :sw .{ .str = str };
+                break :blk .{ .str = str };
             }
             if (a == .arr and b == .arr) {
                 // take a
-                const x = try a.arr.ensureUnique(gpa);
+                const x = try a.arr.ensureUnique(vm.gpa);
                 a = .nil;
 
-                try x.elems.ensureUnusedCapacity(gpa, b.arr.elems.items.len);
+                try x.elems.ensureUnusedCapacity(vm.gpa, b.arr.elems.items.len);
                 for (b.arr.elems.items) |e| {
                     x.elems.appendAssumeCapacity(e.retain());
                 }
-                break :sw .{ .arr = x };
+                break :blk .{ .arr = x };
             }
-            if (a != .int or b != .int) return error.BinaryOperationNotNums;
-            break :sw .{ .int = a.int + b.int };
+            return error.CanNotAdd;
         },
-        .sub => {
-            if (a != .int or b != .int) return error.BinaryOperationNotNums;
-            break :sw .{ .int = a.int - b.int };
-        },
-        .mul => {
-            if (a != .int or b != .int) return error.BinaryOperationNotNums;
-            break :sw .{ .int = a.int * b.int };
-        },
-        .div => {
-            if (a != .int or b != .int) return error.BinaryOperationNotNums;
-            break :sw .{ .int = @divFloor(a.int, b.int) };
-        },
-        .gt => {
-            if (a != .int or b != .int) return error.BinaryOperationNotNums;
-            break :sw .{ .int = if (a.int > b.int) 1 else 0 };
-        },
-        .lt => {
-            if (a != .int or b != .int) return error.BinaryOperationNotNums;
-            break :sw .{ .int = if (a.int < b.int) 1 else 0 };
-        },
-        .eql => {
-            if (a == .nil and b == .nil) break :sw .{ .int = 1 };
-            if (a == .int and b == .int) {
-                break :sw .{ .int = if (a.int == b.int) 1 else 0 };
-            }
-            if (a == .str and b == .str) {
-                break :sw .{ .int = if (std.mem.eql(u8, a.str.buffer, b.str.buffer)) 1 else 0 };
-            } else {
-                return error.EqlWithDifferentTypes;
-            }
-        },
-        else => @compileError("binary op called without an binary operation"),
+        .eql => .{ .int = @intFromBool(a.eql(b)) },
+        else => return error.IllegalBinaryOperation,
     };
 
-    try stack.append(gpa, value);
+    try vm.stack.append(vm.gpa, value);
 }
 
-inline fn unop(stack: *std.ArrayList(Value), gpa: std.mem.Allocator, comptime op: Inst.Op) !void {
-    const a = stack.pop().?;
-    defer a.release(gpa);
+inline fn unop(vm: *Vm, comptime op: Inst.Op) !void {
+    const a = vm.stack.pop().?;
+    defer a.release(vm.gpa);
     switch (op) {
         .neg => {
             const r: Value = switch (a) {
                 .int => |i| .{ .int = -i },
                 else => return error.UnssuportedOpForType,
             };
-            try stack.append(gpa, r);
+            try vm.stack.append(vm.gpa, r);
         },
         .not => {
-            const t = a.truthy();
-            try stack.append(gpa, if (t) .{ .int = 0 } else .{ .int = 1 });
+            try vm.stack.append(vm.gpa, .{ .int = @intFromBool(!a.truthy()) });
         },
         else => @compileError("unary op called without an unary operation"),
     }

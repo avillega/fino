@@ -4,6 +4,8 @@ const Parser = @import("Parser.zig");
 const Program = @import("Program.zig");
 const Vm = @import("../Vm.zig");
 
+const NodeTag = std.meta.Tag(Parser.Node);
+
 const CompilerError = error{
     DuplicatedFn,
     FnNotDefined,
@@ -22,7 +24,7 @@ pub fn compile(prog: *Program, ast: Parser.Ast) CompilerError!usize {
     };
     defer c.locals.deinit(prog.gpa);
 
-    const start = prog.insts.items.len;
+    const start = c.nextAddr();
     try c.compileBody();
     try c.emit(.halt);
     return start;
@@ -84,7 +86,9 @@ const Compiler = struct {
                 .nil => try c.emit(.nil),
                 .const_int => |id| try c.emitPld(.const_int, id),
                 .str_lit => |id| try c.emitPld(.str_lit, id),
+                .atom => |id| try c.emitPld(.atom, id),
                 .arr_lit => |elem_cnt| try c.emitPld(.arr_lit, elem_cnt),
+                .record_lit => |pair_cnt| try c.emitPld(.record_lit, pair_cnt),
                 .get_index => try c.emit(.get_index),
                 .set_index => |id| {
                     if (c.findVarIdx(id)) |slot| {
@@ -167,9 +171,8 @@ const Compiler = struct {
 
     fn compileFn(c: *Compiler, f: Parser.Node.VariantType(.fn_begin)) CompilerError!void {
         const idx = c.prog.fn_map.get(f.id) orelse return error.FnNotDefined;
-        const patch = c.prog.insts.items.len;
-        try c.emit(.jmp);
-        c.prog.fn_table.items[idx].body = .{ .entry = c.prog.insts.items.len };
+        const jmp = try c.emitJump(.jmp); // jump over the body
+        c.prog.fn_table.items[idx].body = .{ .entry = c.nextAddr() };
 
         const curr_frame = c.frame;
         c.frame = c.locals.items.len;
@@ -177,12 +180,11 @@ const Compiler = struct {
         defer c.locals.items.len = c.frame.?;
 
         try c.compileBody();
-        std.debug.assert(c.ast[c.i] == .fn_end);
-        c.i += 1;
+        c.expectNode(.fn_end);
 
         try c.emit(.nil);
         try c.emit(.ret);
-        c.prog.insts.items[patch].pld = @intCast(c.prog.insts.items.len);
+        c.patch(jmp);
     }
 
     fn compileScope(c: *Compiler) CompilerError!void {
@@ -190,8 +192,7 @@ const Compiler = struct {
         c.depth += 1;
         defer c.depth -= 1;
         try c.compileBody();
-        std.debug.assert(c.ast[c.i] == .scope_end);
-        c.i += 1;
+        c.expectNode(.scope_end);
         const count = c.locals.items.len - locals_start;
         if (count > 0) try c.emitPld(.pop_n, @intCast(count));
     }
@@ -212,41 +213,54 @@ const Compiler = struct {
 
     fn compileIf(c: *Compiler) CompilerError!void {
         // cond is already compiled at this point
-        const patch_jze = c.prog.insts.items.len;
-        try c.emit(.jmpf); // must be patched
+        const jze = try c.emitJump(.jmpf);
         try c.compileBody();
         switch (c.ast[c.i]) {
             .if_end => {
-                c.i += 1; // eat .if_end
-                c.prog.insts.items[patch_jze].pld = @intCast(c.prog.insts.items.len); // patch jze
+                c.expectNode(.if_end);
+                c.patch(jze);
             },
             .if_else => {
-                c.i += 1; // eat .if_else
-                const patch_jmp = c.prog.insts.items.len;
-                try c.emit(.jmp);
-                c.prog.insts.items[patch_jze].pld = @intCast(c.prog.insts.items.len); // patch jze
+                c.expectNode(.if_else);
+                const jmp = try c.emitJump(.jmp); // jump over the else
+                c.patch(jze);
 
                 try c.compileBody();
-                c.prog.insts.items[patch_jmp].pld = @intCast(c.prog.insts.items.len); // patch jmp
-                std.debug.assert(c.ast[c.i] == .if_end);
-                c.i += 1;
+                c.patch(jmp);
+                c.expectNode(.if_end);
             },
             else => unreachable,
         }
     }
 
     fn compileWhile(c: *Compiler) CompilerError!void {
-        const loop_top = c.prog.insts.items.len;
+        const loop_top = c.nextAddr();
         try c.compileBody(); // compiles the condition
-        std.debug.assert(c.ast[c.i] == .while_do);
-        c.i += 1;
-        const patch_jze = c.prog.insts.items.len;
-        try c.emit(.jmpf);
+        c.expectNode(.while_do);
+        const jze = try c.emitJump(.jmpf);
         try c.compileBody(); // compiles the body of the while
-        std.debug.assert(c.ast[c.i] == .while_end);
-        c.i += 1;
+        c.expectNode(.while_end);
         try c.emitPld(.jmp, @intCast(loop_top));
-        c.prog.insts.items[patch_jze].pld = @intCast(c.prog.insts.items.len);
+        c.patch(jze);
+    }
+
+    fn nextAddr(c: *Compiler) usize {
+        return c.prog.insts.items.len;
+    }
+
+    fn emitJump(c: *Compiler, comptime op: Vm.Inst.Op) CompilerError!usize {
+        const at = c.nextAddr();
+        try c.emit(op);
+        return at;
+    }
+
+    fn patch(c: *Compiler, pos: usize) void {
+        c.prog.insts.items[pos].pld = @intCast(c.nextAddr());
+    }
+
+    fn expectNode(c: *Compiler, comptime tag: NodeTag) void {
+        std.debug.assert(c.ast[c.i] == tag);
+        c.i += 1;
     }
 
     fn emit(c: *Compiler, comptime op: Vm.Inst.Op) !void {
