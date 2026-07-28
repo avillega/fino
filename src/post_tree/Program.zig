@@ -438,3 +438,58 @@ test "run: mutate function parameter" {
     );
     try std.testing.expectEqualStrings("hello\n[1, 2, 3]\n", w.buffered());
 }
+
+test "run: basic for loop over array" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
+
+    try prog.run(&vm,
+        \\var x = [1, 2, 3, "hello"]
+        \\for (x) |v| {
+        \\  print(v)
+        \\}
+        \\print(x)
+    );
+    try std.testing.expectEqualStrings("1\n2\n3\nhello\n[1, 2, 3, hello]\n", w.buffered());
+}
+
+test "run: index a record" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
+
+    try prog.run(&vm,
+        \\var x = .{:a "hello", :b "world"}
+        \\print(x[:a], x[:b])
+    );
+    try std.testing.expectEqualStrings("hello world\n", w.buffered());
+}
+
+test "run: set key that does not exists" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
+
+    try prog.run(&vm,
+        \\var x = .{:a "hello", :b "world"}
+        \\x[:c] = "new_one"
+        \\print(x[:c])
+    );
+    try std.testing.expectEqualStrings("new_one\n", w.buffered());
+}

@@ -58,8 +58,8 @@ const Compiler = struct {
             const node = c.ast[c.i];
             c.i += 1;
             switch (node) {
-                .dec_capture, .for_do, .for_end => {},
-                .scope_end, .fn_end, .while_end, .while_do, .if_else, .if_end => {
+                .dec_capture => unreachable, // handled in compileFor, never in compileBody
+                .scope_end, .fn_end, .while_end, .while_do, .if_else, .if_end, .for_end => {
                     c.i -= 1; // will be checked by the caller
                     return;
                 },
@@ -126,13 +126,13 @@ const Compiler = struct {
                     try c.emit(.pop);
                 },
                 .dec_param => |id| {
-                    try c.locals.append(c.prog.gpa, id);
+                    try c.emitLocal(id);
                 },
                 .dec_var => |id| {
                     if (c.depth == 0) {
                         try c.emitPld(.dec_glob, id);
                     } else {
-                        try c.locals.append(c.prog.gpa, id);
+                        try c.emitLocal(id);
                     }
                 },
                 .get_var => |id| {
@@ -166,8 +166,38 @@ const Compiler = struct {
                 .fn_begin => |f| try c.compileFn(f),
                 .if_then => try c.compileIf(),
                 .while_begin => try c.compileWhile(),
+                .for_do => try c.compileFor(),
             }
         }
+    }
+
+    fn compileFor(c: *Compiler) CompilerError!void {
+        const hidden_slot = comptime std.math.maxInt(u24);
+
+        const locals_start = c.locals.items.len;
+        defer c.locals.items.len = locals_start;
+
+        try c.locals.appendNTimes(c.prog.gpa, hidden_slot, 2);
+
+        var n: u4 = 0;
+        while (c.ast[c.i] == .dec_capture) : (c.i += 1) {
+            try c.emitLocal(c.ast[c.i].dec_capture);
+            n += 1;
+        }
+
+        try c.emitPld(.iter_begin, n);
+        const loop_top = c.nextAddr();
+
+        const to_exit = c.nextAddr(); //iter_next addr to patch it later
+        try c.emitPld(.iter_next, @bitCast(Vm.IterPayload{ .n = n, .exit = 0 })); // must be patched
+
+        try c.compileBody();
+        c.expectNode(.for_end);
+
+        try c.emitPld(.jmp, @intCast(loop_top));
+        c.prog.insts.items[to_exit].pld = @bitCast(Vm.IterPayload{ .n = n, .exit = @intCast(c.nextAddr()) });
+
+        try c.emitPld(.pop_n, @intCast(n + 2));
     }
 
     fn compileFn(c: *Compiler, f: Parser.Node.VariantType(.fn_begin)) CompilerError!void {
@@ -245,7 +275,7 @@ const Compiler = struct {
         c.patch(jze);
     }
 
-    fn nextAddr(c: *Compiler) usize {
+    inline fn nextAddr(c: *Compiler) usize {
         return c.prog.insts.items.len;
     }
 
@@ -264,11 +294,15 @@ const Compiler = struct {
         c.i += 1;
     }
 
-    fn emit(c: *Compiler, comptime op: Vm.Inst.Op) !void {
+    inline fn emit(c: *Compiler, comptime op: Vm.Inst.Op) !void {
         try c.emitPld(op, 0);
     }
 
-    fn emitPld(c: *Compiler, comptime op: Vm.Inst.Op, pld: u24) !void {
+    inline fn emitPld(c: *Compiler, comptime op: Vm.Inst.Op, pld: u24) !void {
         try c.prog.insts.append(c.prog.gpa, .{ .op = op, .pld = pld });
+    }
+
+    inline fn emitLocal(c: *Compiler, id: u24) !void {
+        try c.locals.append(c.prog.gpa, id);
     }
 };

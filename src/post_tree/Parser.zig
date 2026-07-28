@@ -426,6 +426,7 @@ fn parseFactor(self: *Parser) Error!void {
             }
         },
         .str_lit => try self.addNode(.{ .str_lit = try self.internToken(.str_lit) }),
+        .atom => try self.addNode(.{ .atom = try self.internToken(.atom) }),
         .obracket => try self.parseArray(),
         .orecord => try self.parseRecord(),
         .oparen => {
@@ -932,6 +933,24 @@ test "parse: for" {
         .expr_stmt,
         .{ .scope_end = 1 },
         .{ .for_end = 2 },
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+test "parse: simple record index get" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ a[:a]
+    ;
+    var parser = Parser.init(gpa, &interner);
+    const ast = try parser.parse(src);
+    defer gpa.free(ast);
+    const expected = [_]Node{
+        .{ .get_var = 0 },
+        .{ .atom = 0 },
+        .get_index,
+        .expr_stmt,
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
 }

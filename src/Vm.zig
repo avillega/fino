@@ -11,6 +11,11 @@ pub const CallPayload = packed struct(u24) {
     arity: u8,
 };
 
+pub const IterPayload = packed struct(u24) {
+    n: u4,
+    exit: u20,
+};
+
 pub const FnInfo = struct {
     name_id: u24,
     arity: ?u8,
@@ -56,7 +61,7 @@ const RecordObj = struct {
         if (r.rc == 1) return r;
 
         for (r.map.values()) |v| {
-            v.retain();
+            _ = v.retain();
         }
 
         const map: std.array_hash_map.Auto(u24, Value) = try .init(
@@ -246,6 +251,8 @@ pub const Inst = packed struct(u32) {
         jmp,
         jmpf,
         jmpt,
+        iter_begin,
+        iter_next,
         ret,
         halt,
         call,
@@ -281,6 +288,14 @@ pub const Inst = packed struct(u32) {
             .jmpt,
             .call,
             => try w.print("{t} {d}", .{ i.op, i.pld }),
+            .call_native => {
+                const p: CallPayload = @bitCast(i.pld);
+                try w.print("{t} {d}/{d}", .{ i.op, p.fn_idx, p.arity });
+            },
+            .iter_next => {
+                const p: IterPayload = @bitCast(i.pld);
+                try w.print("{t} {d}", .{ i.op, p.exit });
+            },
             else => try w.print("{t}", .{i.op}),
         }
     }
@@ -615,6 +630,61 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
             try vm.stack.append(vm.gpa, r);
             continue :loop vm.trace(next(&pc, insts), pc);
         },
+        .iter_begin => {
+            const n = insts[pc].pld;
+            const it = vm.stack.items[vm.stack.items.len - 1];
+            switch (it) {
+                .arr, .rec => {},
+                else => return vm.fail("cannot iterate over {f}", .{it.fmt(vm.interner)}),
+            }
+            try vm.stack.append(vm.gpa, .{ .int = 0 });
+            try vm.stack.appendNTimes(vm.gpa, .nil, n);
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .iter_next => {
+            const p: IterPayload = @bitCast(insts[pc].pld);
+            const it = vm.stack.items[vm.stack.items.len - p.n - 2];
+            const cur = &vm.stack.items[vm.stack.items.len - p.n - 1];
+            const i = cur.int; // must be int
+
+            const count = switch (it) {
+                .arr => |a| a.elems.items.len,
+                .rec => |r| r.map.count(),
+                else => unreachable,
+            };
+
+            if (i >= count) {
+                pc = p.exit;
+                continue :loop vm.trace(insts[pc], pc);
+            }
+            cur.int += 1;
+
+            const capts = vm.stack.items[vm.stack.items.len - p.n ..];
+            switch (p.n) {
+                1 => {
+                    const v = switch (it) {
+                        .arr => |arr| arr.elems.items[@bitCast(i)],
+                        .rec => |rec| rec.map.values()[@bitCast(i)],
+                        else => unreachable,
+                    };
+                    capts[0].release(vm.gpa);
+                    capts[0] = v.retain();
+                },
+                2 => {
+                    const k: Value, const v: Value = switch (it) {
+                        .arr => |arr| .{ .{ .int = i }, arr.elems.items[@bitCast(i)] },
+                        .rec => |rec| .{ .{ .atom = rec.map.keys()[@bitCast(i)] }, rec.map.values()[@bitCast(i)] },
+                        else => unreachable,
+                    };
+                    capts[0].release(vm.gpa);
+                    capts[0] = k.retain();
+                    capts[1].release(vm.gpa);
+                    capts[1] = v.retain();
+                },
+                else => unreachable,
+            }
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
         .halt => {
             break :loop;
         },
@@ -629,39 +699,60 @@ inline fn getIdx(vm: *Vm) !void {
         target.release(vm.gpa);
     }
 
-    if (idx != .int) return error.IdxMustBeInt;
-    const i = idx.int;
     switch (target) {
         .str => return error.Nyi, // TODO: support chars/bytes?
         .arr => |a| {
+            if (idx != .int) return error.IdxMustBeInt;
+
+            const i = idx.int;
             if (i < 0 or i >= a.elems.items.len) return error.IndexOutOfBounds;
             try vm.stack.append(vm.gpa, a.elems.items[@intCast(i)].retain());
+        },
+        .rec => |r| {
+            if (idx != .atom) return error.IdxMustBeAtom;
+            const v: Value = r.map.get(idx.atom) orelse .nil;
+            try vm.stack.append(vm.gpa, v.retain());
         },
         else => return error.TargetMustBeIndexable,
     }
 }
 
 inline fn setIdx(vm: *Vm) !void {
-    const arr = vm.stack.pop().?;
+    const target = vm.stack.pop().?;
     const val = vm.stack.pop().?;
     const idx = vm.stack.pop().?;
     defer {
         idx.release(vm.gpa);
     }
     errdefer {
-        arr.release(vm.gpa);
+        target.release(vm.gpa);
         val.release(vm.gpa);
     }
 
-    if (arr != .arr) return error.TargetMustBeIndexable;
-    if (idx != .int) return error.IdxMustBeInt;
-    if (idx.int < 0 or idx.int >= arr.arr.elems.items.len) return error.IndexOutOfBounds;
-    const i: usize = @intCast(idx.int);
+    switch (target) {
+        .arr => |a| {
+            if (idx != .int) return error.IdxMustBeInt;
+            if (idx.int < 0 or idx.int >= a.elems.items.len) return error.IndexOutOfBounds;
+            const i: usize = @intCast(idx.int);
 
-    const x = try arr.arr.ensureUnique(vm.gpa);
-    x.elems.items[i].release(vm.gpa);
-    x.elems.items[i] = val;
-    try vm.stack.append(vm.gpa, .{ .arr = x });
+            const x = try a.ensureUnique(vm.gpa);
+            x.elems.items[i].release(vm.gpa);
+            x.elems.items[i] = val;
+            try vm.stack.append(vm.gpa, .{ .arr = x });
+        },
+        .rec => |r| {
+            if (idx != .atom) return error.IdxMustBeAtom;
+            const x = try r.ensureUnique(vm.gpa);
+
+            const gop = try x.map.getOrPut(vm.gpa, idx.atom);
+            if (gop.found_existing) {
+                gop.value_ptr.*.release(vm.gpa);
+            }
+            gop.value_ptr.* = val;
+            try vm.stack.append(vm.gpa, .{ .rec = x });
+        },
+        else => return error.TargetMustBeIndexable,
+    }
 }
 
 inline fn binop(vm: *Vm, comptime op: Inst.Op) !void {
