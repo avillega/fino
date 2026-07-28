@@ -1,4 +1,4 @@
-/// Managed struct
+// Managed struct
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Interner = @This();

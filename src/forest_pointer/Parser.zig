@@ -370,7 +370,6 @@ fn expectEndStmt(self: *Parser) !void {
     }
 }
 
-/// check that the current token is of the expected tag
 fn expectToken(self: *Parser, expected: Token.Tag) Error!Token {
     const t = self.curr;
     self.advanceTokens();

@@ -7,7 +7,6 @@ const Token = Lexer.Token;
 const Parser = @This();
 pub const Ast = []Node;
 
-/// arity is stored in a u8, so a fn takes at most this many params
 const max_params = 255;
 
 gpa: Allocator,
@@ -508,7 +507,6 @@ fn expectEndStmt(self: *Parser) !void {
     }
 }
 
-/// check that the current token is of the expected tag and eats the token
 fn expectToken(self: *Parser, expected: Token.Tag) Error!void {
     const t = self.curr;
     self.advanceTokens();

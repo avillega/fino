@@ -1,6 +1,3 @@
-//! Debug views of the front half of the pipeline. Each fn is self-contained
-//! — it parses with its own local interner and needs nothing from the
-//! session.
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
