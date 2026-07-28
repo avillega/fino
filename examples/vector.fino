@@ -18,9 +18,11 @@ fn print_vec(v) {
 var vec = .{:x 20, :y 50}
 print(vec)
 
-vec = scale(vec, 2)
-print(vec)
+# mutable value semantics, even though scale "mutates" its argument it was passed as a value semantically
+var another = scale(vec, 2)
+print(another)
 
+# Values are passed Copy-On-Write, when reference count == 1, mutates in place for perf
 vec = add(vec, .{:x 1, :y 1})
 print(vec)
 
