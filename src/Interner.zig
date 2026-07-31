@@ -1,15 +1,29 @@
-// Managed struct
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Interner = @This();
+
+const F64Context = struct {
+    pub fn hash(self: @This(), key: f64) u64 {
+        _ = self;
+        if (key == 0.0) return 0;
+        if (std.math.isNan(key)) return @bitCast(std.math.nan(f64));
+        return @bitCast(key);
+    }
+
+    pub fn eql(self: @This(), a: f64, b: f64) bool {
+        _ = self;
+        if (std.math.isNan(a) and std.math.isNan(b)) return true;
+        return a == b;
+    }
+};
 
 gpa: Allocator,
 string_arena: std.heap.ArenaAllocator,
 string_map: std.StringHashMapUnmanaged(u24),
 strings: std.ArrayList([]const u8),
 
-consts_map: std.AutoHashMapUnmanaged(i64, u24),
-consts: std.ArrayList(i64),
+consts_map: std.HashMapUnmanaged(f64, u24, F64Context, std.hash_map.default_max_load_percentage),
+consts: std.ArrayList(f64),
 
 pub fn init(gpa: Allocator) Interner {
     return .{
@@ -42,7 +56,7 @@ pub fn intern_s(self: *Interner, s: []const u8) !u24 {
     return gop.value_ptr.*;
 }
 
-pub fn intern_i(self: *Interner, i: i64) !u24 {
+pub fn intern_i(self: *Interner, i: f64) !u24 {
     const gop = try self.consts_map.getOrPut(self.gpa, i);
     if (gop.found_existing) return gop.value_ptr.*;
 
@@ -58,7 +72,7 @@ pub fn get_s(self: *const Interner, id: u24) ![]const u8 {
     return self.strings.items[id];
 }
 
-pub fn get_i(self: *const Interner, id: u24) !i64 {
+pub fn get_i(self: *const Interner, id: u24) !f64 {
     if (id >= self.consts.items.len) return error.ConstDoesNotExists;
 
     return self.consts.items[id];

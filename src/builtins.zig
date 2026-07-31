@@ -24,15 +24,15 @@ pub fn len(vm: *Vm, args: []Value) NativeError!Value {
     std.debug.assert(args.len == 1);
     const arg = args[0];
     const l = switch (arg) {
-        .int => 0,
+        .number => 0,
         .nil => 0,
         .atom => 0,
         .str => |s| s.buffer.len,
         .arr => |a| a.elems.items.len,
         .rec => |r| r.map.entries.len,
-        .taken => unreachable,
+        .taken, .idx => unreachable,
     };
-    return .{ .int = @intCast(l) };
+    return .{ .number = @floatFromInt(l) };
 }
 
 pub fn append(vm: *Vm, args: []Value) NativeError!Value {

@@ -30,7 +30,7 @@ pub const Token = struct {
         lt,
         gt,
         sep,
-        integer,
+        number,
 
         eql_eql,
         bang_eql,
@@ -88,7 +88,7 @@ pub fn next(self: *Lexer) Token {
         gt,
         bang,
         ident,
-        integ,
+        number,
         str,
         orecord,
         atom,
@@ -194,7 +194,7 @@ pub fn next(self: *Lexer) Token {
                 },
                 '0'...'9' => {
                     self.curr += 1;
-                    continue :sw .integ;
+                    continue :sw .number;
                 },
                 else => {
                     std.debug.panic("unhandled char {c}", .{self.src[self.curr]});
@@ -250,15 +250,26 @@ pub fn next(self: *Lexer) Token {
             const lexeme = self.src[start..self.curr];
             return .{ .tag = identTag(lexeme), .start = start, .end = self.curr };
         },
-        .integ => {
-            switch (self.src[self.curr]) {
-                '0'...'9' => {
-                    self.curr += 1;
-                    continue :sw .integ;
-                },
-                else => {},
+        .number => {
+            var curr = self.src[self.curr];
+            var dot = false;
+            while (true) : (curr = self.src[self.curr]) {
+                switch (curr) {
+                    '0'...'9' => {
+                        self.curr += 1;
+                    },
+                    '.' => {
+                        if (dot) return .{ .tag = .err, .start = start, .end = self.curr };
+                        dot = true;
+                        self.curr += 1;
+                    },
+                    else => {
+                        break;
+                    },
+                }
             }
-            return .{ .tag = .integer, .start = start, .end = self.curr };
+
+            return .{ .tag = .number, .start = start, .end = self.curr };
         },
         .str => {
             switch (self.src[self.curr]) {
@@ -409,10 +420,10 @@ test "integers and identfiers" {
     const src = "100 a100 _100 1 a1";
     var lex = Lexer.init(src);
 
-    try expectToken(src, lex.next(), .integer, "100");
+    try expectToken(src, lex.next(), .number, "100");
     try expectToken(src, lex.next(), .identifier, "a100");
     try expectToken(src, lex.next(), .identifier, "_100");
-    try expectToken(src, lex.next(), .integer, "1");
+    try expectToken(src, lex.next(), .number, "1");
     try expectToken(src, lex.next(), .identifier, "a1");
     try t.expectEqual(.eof, lex.next().tag);
 }
@@ -422,7 +433,7 @@ test "operators" {
     const src = "100 + a - b * c / d";
     var lex = Lexer.init(src);
 
-    try expectToken(src, lex.next(), .integer, "100");
+    try expectToken(src, lex.next(), .number, "100");
     try expectToken(src, lex.next(), .plus, "+");
     try expectToken(src, lex.next(), .identifier, "a");
     try expectToken(src, lex.next(), .minus, "-");
@@ -439,9 +450,9 @@ test "two char operators" {
     const src = "100 == 10 != b <= c >= d; var x = y";
     var lex = Lexer.init(src);
 
-    try expectToken(src, lex.next(), .integer, "100");
+    try expectToken(src, lex.next(), .number, "100");
     try expectToken(src, lex.next(), .eql_eql, "==");
-    try expectToken(src, lex.next(), .integer, "10");
+    try expectToken(src, lex.next(), .number, "10");
     try expectToken(src, lex.next(), .bang_eql, "!=");
     try expectToken(src, lex.next(), .identifier, "b");
     try expectToken(src, lex.next(), .lt_eql, "<=");
@@ -542,6 +553,20 @@ test "for lexing" {
     try expectToken(src, lex.next(), .pipe, "|");
     try expectToken(src, lex.next(), .obrace, "{");
     try expectToken(src, lex.next(), .cbrace, "}");
+    try t.expectEqual(.sep, lex.next().tag);
+    try t.expectEqual(.eof, lex.next().tag);
+}
+
+test "number lexing" {
+    const t = std.testing;
+    const src =
+        \\ 20 + 420.69
+        \\
+    ;
+    var lex = Lexer.init(src);
+    try expectToken(src, lex.next(), .number, "20");
+    try expectToken(src, lex.next(), .plus, "+");
+    try expectToken(src, lex.next(), .number, "420.69");
     try t.expectEqual(.sep, lex.next().tag);
     try t.expectEqual(.eof, lex.next().tag);
 }

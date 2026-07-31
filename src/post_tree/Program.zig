@@ -493,3 +493,22 @@ test "run: set key that does not exists" {
     );
     try std.testing.expectEqualStrings("new_one\n", w.buffered());
 }
+
+test "run: float operations" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
+
+    try prog.run(&vm,
+    \\ print(2.0 + 3.5)
+    \\ print(2.0 - 1.5)
+    \\ print(2.0 * 3.5)
+    \\ print(1.0 / 2)
+    );
+    try std.testing.expectEqualStrings("5.5\n0.5\n7\n0.5\n", w.buffered());
+}

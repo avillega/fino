@@ -394,8 +394,8 @@ fn binOp(tag: Token.Tag) ?struct { node: Node, prec: u16 } {
 
 fn parseFactor(self: *Parser) Error!void {
     switch (self.curr.tag) {
-        .integer => {
-            const n = try std.fmt.parseInt(i64, self.curr.lexeme(self.src), 10);
+        .number => {
+            const n = try std.fmt.parseFloat(f64, self.curr.lexeme(self.src));
             const c = try self.interner.intern_i(n);
             try self.addNode(.{ .const_int = c });
             self.advanceTokens();

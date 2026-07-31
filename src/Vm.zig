@@ -82,7 +82,8 @@ const RecordObj = struct {
 pub const Value = union(enum) {
     nil,
     taken,
-    int: i64,
+    idx: usize,
+    number: f64,
     atom: u24,
     str: *StrObj,
     arr: *ArrayObj,
@@ -103,7 +104,8 @@ pub const Value = union(enum) {
             switch (self.v) {
                 .nil => try w.writeAll("nil"),
                 .taken => try w.writeAll("<taken>"),
-                .int => |i| try w.print("{d}", .{i}),
+                .idx => try w.writeAll("<idx>"),
+                .number => |i| try w.print("{d}", .{i}),
                 .atom => |id| try w.print(":{s}", .{self.interner.get_s(id) catch "?"}),
                 .str => |s| try w.writeAll(s.buffer),
                 .arr => |a| {
@@ -133,7 +135,7 @@ pub const Value = union(enum) {
         return switch (v) {
             .taken => unreachable,
             .nil => false,
-            .int => |i| i != 0,
+            .number => |i| i != 0,
             else => true,
         };
     }
@@ -143,7 +145,8 @@ pub const Value = union(enum) {
         return switch (a) {
             .taken => unreachable,
             .nil => true,
-            .int => a.int == b.int,
+            .idx => a.idx == b.idx,
+            .number => a.number == b.number,
             .atom => a.atom == b.atom,
             .str => |s| s == b.str or std.mem.eql(u8, s.buffer, b.str.buffer),
             .arr => |x| {
@@ -170,7 +173,12 @@ pub const Value = union(enum) {
 
     pub fn release(v: Value, gpa: Allocator) void {
         switch (v) {
-            .nil, .int, .taken, .atom => {},
+            .nil,
+            .number,
+            .taken,
+            .atom,
+            .idx,
+            => {},
             .str => |s| {
                 s.rc -= 1;
                 if (s.rc == 0) {
@@ -203,7 +211,7 @@ pub const Value = union(enum) {
 
     pub fn retain(v: Value) Value {
         switch (v) {
-            .nil, .int, .taken, .atom => {},
+            .nil, .number, .taken, .atom, .idx => {},
             inline .str, .arr, .rec => |o| {
                 std.debug.assert(o.rc != 0);
                 o.rc += 1;
@@ -409,7 +417,7 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
         },
         .const_int => {
             const v = vm.interner.consts.items[insts[pc].pld];
-            try vm.stack.append(vm.gpa, .{ .int = v });
+            try vm.stack.append(vm.gpa, .{ .number = v });
             continue :loop vm.trace(next(&pc, insts), pc);
         },
         .atom => {
@@ -637,7 +645,7 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
                 .arr, .rec => {},
                 else => return vm.fail("cannot iterate over {f}", .{it.fmt(vm.interner)}),
             }
-            try vm.stack.append(vm.gpa, .{ .int = 0 });
+            try vm.stack.append(vm.gpa, .{ .idx = 0 });
             try vm.stack.appendNTimes(vm.gpa, .nil, n);
             continue :loop vm.trace(next(&pc, insts), pc);
         },
@@ -645,7 +653,7 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
             const p: IterPayload = @bitCast(insts[pc].pld);
             const it = vm.stack.items[vm.stack.items.len - p.n - 2];
             const cur = &vm.stack.items[vm.stack.items.len - p.n - 1];
-            const i = cur.int; // must be int
+            const i = cur.idx; // must be index
 
             const count = switch (it) {
                 .arr => |a| a.elems.items.len,
@@ -657,9 +665,9 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
                 pc = p.exit;
                 continue :loop vm.trace(insts[pc], pc);
             }
-            cur.int += 1;
+            cur.idx += 1;
 
-            const capts = vm.stack.items[vm.stack.items.len - p.n ..];
+            const captures = vm.stack.items[vm.stack.items.len - p.n ..];
             switch (p.n) {
                 1 => {
                     const v = switch (it) {
@@ -667,19 +675,19 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
                         .rec => |rec| rec.map.values()[@bitCast(i)],
                         else => unreachable,
                     };
-                    capts[0].release(vm.gpa);
-                    capts[0] = v.retain();
+                    captures[0].release(vm.gpa);
+                    captures[0] = v.retain();
                 },
                 2 => {
                     const k: Value, const v: Value = switch (it) {
-                        .arr => |arr| .{ .{ .int = i }, arr.elems.items[@bitCast(i)] },
+                        .arr => |arr| .{ .{ .number = @floatFromInt(i) }, arr.elems.items[@bitCast(i)] },
                         .rec => |rec| .{ .{ .atom = rec.map.keys()[@bitCast(i)] }, rec.map.values()[@bitCast(i)] },
                         else => unreachable,
                     };
-                    capts[0].release(vm.gpa);
-                    capts[0] = k.retain();
-                    capts[1].release(vm.gpa);
-                    capts[1] = v.retain();
+                    captures[0].release(vm.gpa);
+                    captures[0] = k.retain();
+                    captures[1].release(vm.gpa);
+                    captures[1] = v.retain();
                 },
                 else => unreachable,
             }
@@ -702,10 +710,10 @@ inline fn getIdx(vm: *Vm) !void {
     switch (target) {
         .str => return error.Nyi, // TODO: support chars/bytes?
         .arr => |a| {
-            if (idx != .int) return error.IdxMustBeInt;
-
-            const i = idx.int;
+            if (idx != .number) return error.IdxMustBeInt;
+            const i = try floatToIdx(idx.number);
             if (i < 0 or i >= a.elems.items.len) return error.IndexOutOfBounds;
+
             try vm.stack.append(vm.gpa, a.elems.items[@intCast(i)].retain());
         },
         .rec => |r| {
@@ -731,9 +739,9 @@ inline fn setIdx(vm: *Vm) !void {
 
     switch (target) {
         .arr => |a| {
-            if (idx != .int) return error.IdxMustBeInt;
-            if (idx.int < 0 or idx.int >= a.elems.items.len) return error.IndexOutOfBounds;
-            const i: usize = @intCast(idx.int);
+            if (idx != .number) return error.IdxMustBeInt;
+            const i = try floatToIdx(idx.number);
+            if (i < 0 or i >= a.elems.items.len) return error.IndexOutOfBounds;
 
             const x = try a.ensureUnique(vm.gpa);
             x.elems.items[i].release(vm.gpa);
@@ -755,24 +763,30 @@ inline fn setIdx(vm: *Vm) !void {
     }
 }
 
+inline fn floatToIdx(f: f64) !usize {
+    if (f < 0) return error.IndexOutOfBounds;
+    if (f > @floor(f)) return error.IdxMustBeWhole;
+    return @trunc(f);
+}
+
 inline fn binop(vm: *Vm, comptime op: Inst.Op) !void {
     var b = vm.stack.pop().?;
     var a = vm.stack.pop().?;
     defer a.release(vm.gpa);
     defer b.release(vm.gpa);
 
-    if (a == .int and b == .int) {
-        const r: i64 = switch (op) {
-            .add => a.int + b.int,
-            .sub => a.int - b.int,
-            .mul => a.int * b.int,
-            .div => @divFloor(a.int, b.int),
-            .eql => @intFromBool(a.int == b.int),
-            .lt => @intFromBool(a.int < b.int),
-            .gt => @intFromBool(a.int > b.int),
+    if (a == .number and b == .number) {
+        const r: f64 = switch (op) {
+            .add => a.number + b.number,
+            .sub => a.number - b.number,
+            .mul => a.number * b.number,
+            .div => a.number / b.number,
+            .eql => @intFromBool(a.number == b.number),
+            .lt => @intFromBool(a.number < b.number),
+            .gt => @intFromBool(a.number > b.number),
             else => @compileError("binary op called without an binary operation"),
         };
-        return vm.stack.append(vm.gpa, .{ .int = r });
+        return vm.stack.append(vm.gpa, .{ .number = r });
     }
 
     const value: Value = switch (op) {
@@ -799,7 +813,7 @@ inline fn binop(vm: *Vm, comptime op: Inst.Op) !void {
             }
             return error.CanNotAdd;
         },
-        .eql => .{ .int = @intFromBool(a.eql(b)) },
+        .eql => .{ .number = @intFromBool(a.eql(b)) },
         else => return error.IllegalBinaryOperation,
     };
 
@@ -812,13 +826,13 @@ inline fn unop(vm: *Vm, comptime op: Inst.Op) !void {
     switch (op) {
         .neg => {
             const r: Value = switch (a) {
-                .int => |i| .{ .int = -i },
+                .number => |i| .{ .number = -i },
                 else => return error.UnssuportedOpForType,
             };
             try vm.stack.append(vm.gpa, r);
         },
         .not => {
-            try vm.stack.append(vm.gpa, .{ .int = @intFromBool(!a.truthy()) });
+            try vm.stack.append(vm.gpa, .{ .number = @intFromBool(!a.truthy()) });
         },
         else => @compileError("unary op called without an unary operation"),
     }
