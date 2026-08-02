@@ -59,7 +59,7 @@ const Compiler = struct {
             c.i += 1;
             switch (node) {
                 .dec_capture => unreachable, // handled in compileFor, never in compileBody
-                .scope_end, .fn_end, .while_end, .while_do, .if_else, .if_end, .for_end => {
+                .scope_end, .fn_end, .while_end, .while_do, .if_else, .if_end, .for_end, .and_end, .or_end => {
                     c.i -= 1; // will be checked by the caller
                     return;
                 },
@@ -69,6 +69,7 @@ const Compiler = struct {
                 .sub_expr => try c.emit(.sub),
                 .mul_expr => try c.emit(.mul),
                 .div_expr => try c.emit(.div),
+                .mod_expr => try c.emit(.mod),
                 .eql_expr => try c.emit(.eql),
                 .not_eql_expr => {
                     try c.emit(.eql);
@@ -161,6 +162,18 @@ const Compiler = struct {
                             try c.emitPld(.set_glob, id);
                         }
                     }
+                },
+                .and_then => {
+                    const jf = try c.emitJump(.jmpfk);
+                    try c.compileBody();
+                    c.patch(jf);
+                    c.expectNode(.and_end);
+                },
+                .or_then => {
+                    const jt = try c.emitJump(.jmptk);
+                    try c.compileBody();
+                    c.patch(jt);
+                    c.expectNode(.or_end);
                 },
                 .scope_begin => try c.compileScope(),
                 .fn_begin => |f| try c.compileFn(f),

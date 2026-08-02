@@ -37,6 +37,7 @@ const Tag = enum(u8) {
     sub_expr,
     mul_expr,
     div_expr,
+    mod_expr,
     eql_expr,
     not_eql_expr,
     lt_expr,
@@ -59,6 +60,11 @@ const Tag = enum(u8) {
     if_then,
     if_else,
     if_end,
+
+    and_then,
+    and_end,
+    or_then,
+    or_end,
 
     while_begin,
     while_do,
@@ -87,6 +93,7 @@ pub const Node = union(Tag) {
     sub_expr,
     mul_expr,
     div_expr,
+    mod_expr,
     eql_expr,
     not_eql_expr,
     lt_expr,
@@ -110,6 +117,11 @@ pub const Node = union(Tag) {
     if_then,
     if_else,
     if_end: u5, // display arity is 2 or 3 if has an else branch or not
+
+    and_then,
+    and_end,
+    or_then,
+    or_end,
 
     while_begin,
     while_do,
@@ -370,14 +382,17 @@ fn parseExpr(self: *Parser, min_prec: u16) Error!void {
     while (binOp(self.curr.tag)) |op| {
         if (op.prec < min_prec) break;
         self.advanceTokens(); // eat the binary operation
+        if (op.infix) |marker| try self.addNode(marker);
         // right
         try self.parseExpr(op.prec + 1);
         try self.addNode(op.node);
     }
 }
 
-fn binOp(tag: Token.Tag) ?struct { node: Node, prec: u16 } {
+fn binOp(tag: Token.Tag) ?struct { node: Node, prec: u16, infix: ?Node = null } {
     return switch (tag) {
+        .kw_or => .{ .node = .or_end, .prec = 30, .infix = .or_then },
+        .kw_and => .{ .node = .and_end, .prec = 35, .infix = .and_then },
         .eql_eql => .{ .node = .eql_expr, .prec = 40 },
         .bang_eql => .{ .node = .not_eql_expr, .prec = 40 },
         .lt => .{ .node = .lt_expr, .prec = 40 },
@@ -388,6 +403,7 @@ fn binOp(tag: Token.Tag) ?struct { node: Node, prec: u16 } {
         .minus => .{ .node = .sub_expr, .prec = 45 },
         .star => .{ .node = .mul_expr, .prec = 50 },
         .slash => .{ .node = .div_expr, .prec = 50 },
+        .mod => .{ .node = .mod_expr, .prec = 50 },
         else => null,
     };
 }
@@ -940,6 +956,25 @@ test "parse: simple record index get" {
     defer interner.deinit();
     const src =
         \\ a[:a]
+    ;
+    var parser = Parser.init(gpa, &interner);
+    const ast = try parser.parse(src);
+    defer gpa.free(ast);
+    const expected = [_]Node{
+        .{ .get_var = 0 },
+        .{ .atom = 0 },
+        .get_index,
+        .expr_stmt,
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+
+test "parse: simple and" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ a = a and b
     ;
     var parser = Parser.init(gpa, &interner);
     const ast = try parser.parse(src);

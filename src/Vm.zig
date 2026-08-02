@@ -241,6 +241,7 @@ pub const Inst = packed struct(u32) {
         add,
         sub,
         mul,
+        mod,
         div,
         eql,
         lt,
@@ -258,7 +259,9 @@ pub const Inst = packed struct(u32) {
         set_index,
         jmp,
         jmpf,
+        jmpfk,
         jmpt,
+        jmptk,
         iter_begin,
         iter_next,
         ret,
@@ -374,7 +377,7 @@ fn nameOf(vm: *Vm, id: u24) []const u8 {
     return vm.interner.get_s(id) catch "?";
 }
 
-const trace_enabled = false;
+const trace_enabled = true;
 
 inline fn trace(vm: *Vm, inst: Inst, pc: usize) Inst.Op {
     if (comptime trace_enabled) {
@@ -466,7 +469,7 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
             try vm.unop(op);
             continue :loop vm.trace(next(&pc, insts), pc);
         },
-        inline .add, .sub, .mul, .div, .eql, .lt, .gt => |op| {
+        inline .add, .sub, .mul, .div, .mod, .eql, .lt, .gt => |op| {
             try vm.binop(op);
             continue :loop vm.trace(next(&pc, insts), pc);
         },
@@ -586,6 +589,18 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
             }
             continue :loop vm.trace(insts[pc], pc);
         },
+        .jmpfk => {
+            const val = vm.stack.getLast();
+            const target = insts[pc].pld;
+            pc += 1;
+            if (!val.truthy()) {
+                pc = target;
+            } else {
+                val.release(vm.gpa);
+                _ = vm.stack.pop().?;
+            }
+            continue :loop vm.trace(insts[pc], pc);
+        },
         .jmpt => {
             const val = vm.stack.pop().?;
             defer val.release(vm.gpa);
@@ -593,6 +608,18 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
             pc += 1;
             if (val.truthy()) {
                 pc = target;
+            }
+            continue :loop vm.trace(insts[pc], pc);
+        },
+        .jmptk => {
+            const val = vm.stack.getLast();
+            const target = insts[pc].pld;
+            pc += 1;
+            if (val.truthy()) {
+                pc = target;
+            } else {
+                val.release(vm.gpa);
+                _ = vm.stack.pop().?;
             }
             continue :loop vm.trace(insts[pc], pc);
         },
@@ -781,6 +808,7 @@ inline fn binop(vm: *Vm, comptime op: Inst.Op) !void {
             .sub => a.number - b.number,
             .mul => a.number * b.number,
             .div => a.number / b.number,
+            .mod => @mod(a.number, b.number),
             .eql => @intFromBool(a.number == b.number),
             .lt => @intFromBool(a.number < b.number),
             .gt => @intFromBool(a.number > b.number),

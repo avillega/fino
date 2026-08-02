@@ -47,6 +47,8 @@ pub const Token = struct {
         kw_else,
         kw_while,
         kw_for,
+        kw_and,
+        kw_or,
         str_lit,
         atom,
         identifier,
@@ -74,6 +76,8 @@ const keywords: std.StaticStringMap(Token.Tag) = .initComptime(.{
     .{ "else", .kw_else },
     .{ "while", .kw_while },
     .{ "for", .kw_for },
+    .{ "and", .kw_and },
+    .{ "or", .kw_or },
 });
 
 fn identTag(lexeme: []const u8) Token.Tag {
@@ -383,7 +387,7 @@ test "empty input is eof" {
 
 test "all keywords" {
     const t = std.testing;
-    const src = "fn return print true false var";
+    const src = "fn return print true false var and or for while if else";
     var lex = Lexer.init(src);
 
     try expectToken(src, lex.next(), .kw_fn, "fn");
@@ -392,6 +396,12 @@ test "all keywords" {
     try expectToken(src, lex.next(), .kw_true, "true");
     try expectToken(src, lex.next(), .kw_false, "false");
     try expectToken(src, lex.next(), .kw_var, "var");
+    try expectToken(src, lex.next(), .kw_and, "and");
+    try expectToken(src, lex.next(), .kw_or, "or");
+    try expectToken(src, lex.next(), .kw_for, "for");
+    try expectToken(src, lex.next(), .kw_while, "while");
+    try expectToken(src, lex.next(), .kw_if, "if");
+    try expectToken(src, lex.next(), .kw_else, "else");
     try t.expectEqual(.eof, lex.next().tag);
 }
 

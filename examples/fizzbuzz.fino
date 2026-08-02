@@ -1,0 +1,17 @@
+fn fizz_buzz(n) {
+	var i = 1
+	while (i <= n) {
+		if (i % 3 == 0 and i %  5 == 0) {
+			print(i, "fizzbuzz")
+		} else if (i % 3 == 0) {
+			print(i, "fizz")
+		} else if (i % 5 == 0) {
+			print(i, "buzz")
+		} else {
+			print(i)
+		}
+		i = i+1
+	}
+}
+
+fizz_buzz(50)
