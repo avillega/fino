@@ -229,7 +229,7 @@ const Frame = struct {
 pub const Inst = packed struct(u32) {
     pub const Op = enum(u8) {
         nil,
-        const_int,
+        const_num,
         atom,
         str_lit,
         arr_lit,
@@ -279,7 +279,7 @@ pub const Inst = packed struct(u32) {
         vm: Vm,
     ) std.Io.Writer.Error!void {
         switch (i.op) {
-            .const_int => try w.print("{t} {d}", .{ i.op, vm.interner.consts.items[i.pld] }),
+            .const_num => try w.print("{t} {d}", .{ i.op, vm.interner.consts.items[i.pld] }),
             .str_lit => try w.print("{t} \"{s}\"", .{ i.op, vm.interner.strings.items[i.pld] }),
             .atom => try w.print("{t} :{s}", .{ i.op, vm.interner.strings.items[i.pld] }),
             .dec_glob => try w.print("{t} {s}", .{ i.op, vm.interner.strings.items[i.pld] }),
@@ -316,7 +316,7 @@ pub const Inst = packed struct(u32) {
         w: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
         switch (i.op) {
-            .const_int,
+            .const_num,
             .str_lit,
             .arr_lit,
             .pop_n,
@@ -377,7 +377,7 @@ fn nameOf(vm: *Vm, id: u24) []const u8 {
     return vm.interner.get_s(id) catch "?";
 }
 
-const trace_enabled = true;
+const trace_enabled = false;
 
 inline fn trace(vm: *Vm, inst: Inst, pc: usize) Inst.Op {
     if (comptime trace_enabled) {
@@ -418,7 +418,7 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
             try vm.stack.append(vm.gpa, .nil);
             continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .const_int => {
+        .const_num => {
             const v = vm.interner.consts.items[insts[pc].pld];
             try vm.stack.append(vm.gpa, .{ .number = v });
             continue :loop vm.trace(next(&pc, insts), pc);

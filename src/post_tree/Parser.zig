@@ -20,7 +20,7 @@ interner: *Interner,
 
 const Tag = enum(u8) {
     nil,
-    const_int,
+    const_num,
     atom,
     str_lit,
     arr_lit,
@@ -76,7 +76,7 @@ const Tag = enum(u8) {
 
 pub const Node = union(Tag) {
     nil,
-    const_int: u24,
+    const_num: u24,
     atom: u24,
     str_lit: u24,
     arr_lit: u24, // number of expressions
@@ -413,7 +413,7 @@ fn parseFactor(self: *Parser) Error!void {
         .number => {
             const n = try std.fmt.parseFloat(f64, self.curr.lexeme(self.src));
             const c = try self.interner.intern_i(n);
-            try self.addNode(.{ .const_int = c });
+            try self.addNode(.{ .const_num = c });
             self.advanceTokens();
         },
         .kw_nil => {
@@ -444,6 +444,8 @@ fn parseFactor(self: *Parser) Error!void {
         .atom => try self.addNode(.{ .atom = try self.internToken(.atom) }),
         .obracket => try self.parseArray(),
         .orecord => try self.parseRecord(),
+        .kw_true => try self.addNode(.{ .const_num = 1 }),
+        .kw_false => try self.addNode(.{ .const_num = 0 }),
         .oparen => {
             self.advanceTokens();
             try self.parseExpr(0);
@@ -550,9 +552,9 @@ test "parse: precedence `1 + 2 * 1` parses as 1 + (2 * 1)" {
     defer gpa.free(ast);
 
     const expected = [_]Node{
-        .{ .const_int = 0 },
-        .{ .const_int = 1 },
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
+        .{ .const_num = 1 },
+        .{ .const_num = 0 },
         .mul_expr,
         .add_expr,
         .expr_stmt,
@@ -569,9 +571,9 @@ test "parse: support both ; and endl as stmt terminators" {
     defer gpa.free(ast1);
 
     const expected = [_]Node{
-        .{ .const_int = 0 },
-        .{ .const_int = 1 },
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
+        .{ .const_num = 1 },
+        .{ .const_num = 0 },
         .mul_expr,
         .add_expr,
         .expr_stmt,
@@ -593,10 +595,10 @@ test "parse: using parens to force presedence" {
     defer gpa.free(ast);
 
     const expected = [_]Node{
-        .{ .const_int = 0 },
-        .{ .const_int = 1 },
+        .{ .const_num = 0 },
+        .{ .const_num = 1 },
         .add_expr,
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
         .mul_expr,
         .expr_stmt,
     };
@@ -612,11 +614,11 @@ test "parse: unary operations correctly" {
     defer gpa.free(ast);
 
     const expected = [_]Node{
-        .{ .const_int = 0 },
-        .{ .const_int = 1 },
+        .{ .const_num = 0 },
+        .{ .const_num = 1 },
         .neg_expr,
         .add_expr,
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
         .mul_expr,
         .expr_stmt,
     };
@@ -640,16 +642,16 @@ test "parse: simple block" {
 
     const expected = [_]Node{
         .scope_begin,
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
         .{ .dec_var = 0 },
-        .{ .const_int = 1 },
+        .{ .const_num = 1 },
         .{ .set_var = 0 },
-        .{ .const_int = 2 },
-        .{ .const_int = 2 },
+        .{ .const_num = 2 },
+        .{ .const_num = 2 },
         .add_expr,
         .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
         .expr_stmt,
-        .{ .const_int = 3 },
+        .{ .const_num = 3 },
         .{ .get_var = 0 },
         .add_expr,
         .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
@@ -675,8 +677,8 @@ test "parse: simple function call" {
         .{ .get_var = 1 },
         .{ .call_expr = .{ .id = 0, .arg_c = 1 } },
         .expr_stmt,
-        .{ .const_int = 0 },
-        .{ .const_int = 1 },
+        .{ .const_num = 0 },
+        .{ .const_num = 1 },
         .add_expr,
         .{ .call_expr = .{ .id = 0, .arg_c = 1 } },
         .expr_stmt,
@@ -700,11 +702,11 @@ test "parse: simple if" {
 
     const expected = [_]Node{
         .{ .get_var = 0 },
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
         .eql_expr,
         .if_then,
         .scope_begin,
-        .{ .const_int = 1 },
+        .{ .const_num = 1 },
         .{ .dec_var = 0 },
         .{ .get_var = 0 },
         .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
@@ -734,11 +736,11 @@ test "parse: simple if/else" {
 
     const expected = [_]Node{
         .{ .get_var = 0 },
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
         .eql_expr,
         .if_then,
         .scope_begin,
-        .{ .const_int = 1 },
+        .{ .const_num = 1 },
         .{ .dec_var = 0 },
         .{ .get_var = 0 },
         .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
@@ -746,7 +748,7 @@ test "parse: simple if/else" {
         .{ .scope_end = 2 },
         .if_else,
         .scope_begin,
-        .{ .const_int = 1 },
+        .{ .const_num = 1 },
         .{ .dec_var = 2 },
         .{ .get_var = 2 },
         .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
@@ -780,11 +782,11 @@ test "parse: simple if/elseif/else" {
 
     const expected = [_]Node{
         .{ .get_var = 0 },
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
         .eql_expr,
         .if_then,
         .scope_begin,
-        .{ .const_int = 1 },
+        .{ .const_num = 1 },
         .{ .dec_var = 0 },
         .{ .get_var = 0 },
         .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
@@ -792,11 +794,11 @@ test "parse: simple if/elseif/else" {
         .{ .scope_end = 2 },
         .if_else,
         .{ .get_var = 2 },
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
         .eql_expr,
         .if_then,
         .scope_begin,
-        .{ .const_int = 1 },
+        .{ .const_num = 1 },
         .{ .dec_var = 2 },
         .{ .get_var = 2 },
         .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
@@ -804,7 +806,7 @@ test "parse: simple if/elseif/else" {
         .{ .scope_end = 2 },
         .if_else,
         .scope_begin,
-        .{ .const_int = 1 },
+        .{ .const_num = 1 },
         .{ .dec_var = 3 },
         .{ .get_var = 3 },
         .{ .call_expr = .{ .id = 1, .arg_c = 1 } },
@@ -866,7 +868,7 @@ test "parse: simple array index get" {
     defer gpa.free(ast);
     const expected = [_]Node{
         .{ .get_var = 0 },
-        .{ .const_int = 0 },
+        .{ .const_num = 0 },
         .get_index,
         .expr_stmt,
     };
@@ -884,8 +886,8 @@ test "parse: simple array index set" {
     const ast = try parser.parse(src);
     defer gpa.free(ast);
     const expected = [_]Node{
-        .{ .const_int = 0 },
-        .{ .const_int = 1 },
+        .{ .const_num = 0 },
+        .{ .const_num = 1 },
         .{ .set_index = 0 },
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
@@ -980,10 +982,31 @@ test "parse: simple and" {
     const ast = try parser.parse(src);
     defer gpa.free(ast);
     const expected = [_]Node{
-        .{ .get_var = 0 },
-        .{ .atom = 0 },
-        .get_index,
-        .expr_stmt,
+        .{ .take_var = 0 },
+        .and_then,
+        .{ .get_var = 1 },
+        .and_end,
+        .{ .set_var = 0 },
+    };
+    try std.testing.expectEqualSlices(Node, &expected, ast);
+}
+
+test "parse: simple or" {
+    const gpa = std.testing.allocator;
+    var interner = Interner.init(gpa);
+    defer interner.deinit();
+    const src =
+        \\ a = a or b
+    ;
+    var parser = Parser.init(gpa, &interner);
+    const ast = try parser.parse(src);
+    defer gpa.free(ast);
+    const expected = [_]Node{
+        .{ .take_var = 0 },
+        .or_then,
+        .{ .get_var = 1 },
+        .or_end,
+        .{ .set_var = 0 },
     };
     try std.testing.expectEqualSlices(Node, &expected, ast);
 }

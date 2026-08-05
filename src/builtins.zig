@@ -4,7 +4,12 @@ const Value = Vm.Value;
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
-const NativeError = error{ TargetMustBeArray, TooFewArgs } || Allocator.Error || Writer.Error;
+const NativeError = error{
+    TargetMustBeArray,
+    TooFewArgs,
+    TargetMustBeRecord,
+    KeyMustBeAtom,
+} || Allocator.Error || Writer.Error;
 
 pub const NativeFn = *const fn (vm: *Vm, args: []Value) NativeError!Value;
 
@@ -48,6 +53,16 @@ pub fn append(vm: *Vm, args: []Value) NativeError!Value {
     return .{ .arr = result };
 }
 
+pub fn contains(vm: *Vm, args: []Value) NativeError!Value {
+    _ = vm;
+    std.debug.assert(args.len == 2);
+    if (args[0] != .rec) return error.TargetMustBeRecord;
+    if (args[1] != .atom) return error.KeyMustBeAtom;
+
+    const r = args[0].rec.map.contains(args[1].atom);
+    return .{ .number = @intFromBool(r) };
+}
+
 const NativeDef = struct {
     name: []const u8,
     call: NativeFn,
@@ -58,4 +73,5 @@ pub const builtins = [_]NativeDef{
     .{ .name = "print", .call = print, .arity = null },
     .{ .name = "len", .call = len, .arity = 1 },
     .{ .name = "append", .call = append, .arity = null },
+    .{ .name = "contains", .call = contains, .arity = 2 },
 };

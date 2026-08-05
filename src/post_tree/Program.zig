@@ -505,10 +505,64 @@ test "run: float operations" {
     defer vm.deinit();
 
     try prog.run(&vm,
-    \\ print(2.0 + 3.5)
-    \\ print(2.0 - 1.5)
-    \\ print(2.0 * 3.5)
-    \\ print(1.0 / 2)
+        \\ print(2.0 + 3.5)
+        \\ print(2.0 - 1.5)
+        \\ print(2.0 * 3.5)
+        \\ print(1.0 / 2)
     );
     try std.testing.expectEqualStrings("5.5\n0.5\n7\n0.5\n", w.buffered());
+}
+
+test "run: contains" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
+
+    try prog.run(&vm,
+        \\ var r  = .{:a "hello", :b "world"}
+        \\ print(contains(r, :c))
+        \\ print(contains(r, :b))
+    );
+    try std.testing.expectEqualStrings("0\n1\n", w.buffered());
+}
+
+test "run: or returns first non falsy element" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
+
+    try prog.run(&vm,
+        \\ var r  = .{:a "hello", :b "world"}
+        \\ var x = nil or r[:c] or "missing"
+        \\ print(x)
+    );
+    try std.testing.expectEqualStrings("missing\n", w.buffered());
+}
+
+test "run: and returns first falsy element or last non falsy" {
+    const gpa = std.testing.allocator;
+    var buf: [4096]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+
+    var prog: Program = try .init(gpa);
+    defer prog.deinit();
+    var vm: Vm = .init(&w, gpa, &prog.interner);
+    defer vm.deinit();
+
+    try prog.run(&vm,
+        \\ var r  = .{:a "hello", :b "world"}
+        \\ var x = "missing" and r[:a] and r[:b]
+        \\ print(x)
+    );
+    try std.testing.expectEqualStrings("world\n", w.buffered());
 }

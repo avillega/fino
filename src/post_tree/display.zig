@@ -65,7 +65,7 @@ pub fn printAstTree(w: *Io.Writer, gpa: Allocator, src: [:0]const u8) !void {
 
     for (ast) |node| {
         switch (node) {
-            .scope_begin, .fn_begin, .while_begin, .for_do => continue,
+            .scope_begin, .fn_begin, .while_begin, .for_do, .and_then, .or_then => continue,
             else => {},
         }
         const a = displayArity(node);
@@ -104,7 +104,7 @@ fn printFlat(w: *Io.Writer, ast: Parser.Ast) !void {
 
 fn writeLabel(w: *Io.Writer, interner: *Interner, n: Parser.Node) !void {
     switch (n) {
-        .const_int => |i| try w.print("{t} {d}", .{ n, try interner.get_i(i) }),
+        .const_num => |i| try w.print("{t} {d}", .{ n, try interner.get_i(i) }),
         .set_var,
         .dec_var,
         .dec_param,
@@ -125,18 +125,22 @@ fn writeLabel(w: *Io.Writer, interner: *Interner, n: Parser.Node) !void {
         .for_end => try w.writeAll("for"),
         .arr_lit => try w.writeAll("array"),
         .record_lit => try w.writeAll("record"),
+        .and_end => try w.writeAll("and"),
+        .or_end => try w.writeAll("or"),
         else => |node| try w.print("{t}", .{node}),
     }
 }
 
 inline fn displayArity(n: Parser.Node) u32 {
     return switch (n) {
-        .const_int,
+        .const_num,
         .get_var,
         .take_var,
         .dec_param,
         .nil,
         .if_then,
+        .and_then,
+        .or_then,
         .if_else,
         .str_lit,
         .atom,
@@ -163,6 +167,8 @@ inline fn displayArity(n: Parser.Node) u32 {
         .while_end,
         .get_index,
         .set_index,
+        .and_end,
+        .or_end,
         => 2,
         .call_expr => |c| c.arg_c,
         .if_end => |a| a,
@@ -212,11 +218,13 @@ test "printAstTree: every construct" {
         \\for(record) |k,v| {
         \\  print(k, v)   
         \\}
+        \\var r = nil or "hello"
+        \\var y = 1 and nil
     ;
 
     const expected =
         \\dec_var g
-        \\│ const_int 1
+        \\│ const_num 1
         \\fn add
         \\│ dec_param a
         \\│ dec_param b
@@ -227,26 +235,26 @@ test "printAstTree: every construct" {
         \\│ │ │ │ │ get_var a
         \\│ │ │ │ │ mul_expr
         \\│ │ │ │ │ │ get_var b
-        \\│ │ │ │ │ │ const_int 2
+        \\│ │ │ │ │ │ const_num 2
         \\│ │ │ │ sub_expr
-        \\│ │ │ │ │ const_int 6
-        \\│ │ │ │ │ const_int 7
+        \\│ │ │ │ │ const_num 6
+        \\│ │ │ │ │ const_num 7
         \\│ │ return_stmt
         \\│ │ │ get_var c
         \\expr_stmt
         \\│ call add/2
-        \\│ │ const_int 1
-        \\│ │ const_int 2
+        \\│ │ const_num 1
+        \\│ │ const_num 2
         \\while
         \\│ cond
         \\│ │ lt_expr
         \\│ │ │ get_var g
-        \\│ │ │ const_int 10
+        \\│ │ │ const_num 10
         \\│ block
         \\│ │ if
         \\│ │ │ eql_expr
         \\│ │ │ │ get_var g
-        \\│ │ │ │ const_int 2
+        \\│ │ │ │ const_num 2
         \\│ │ │ then
         \\│ │ │ block
         \\│ │ │ │ expr_stmt
@@ -254,24 +262,24 @@ test "printAstTree: every construct" {
         \\│ │ │ │ │ │ call add/2
         \\│ │ │ │ │ │ │ get_var g
         \\│ │ │ │ │ │ │ neg_expr
-        \\│ │ │ │ │ │ │ │ const_int 1
+        \\│ │ │ │ │ │ │ │ const_num 1
         \\│ │ │ else
         \\│ │ │ if
         \\│ │ │ │ gt_expr
         \\│ │ │ │ │ get_var g
-        \\│ │ │ │ │ const_int 5
+        \\│ │ │ │ │ const_num 5
         \\│ │ │ │ then
         \\│ │ │ │ block
         \\│ │ │ │ │ expr_stmt
         \\│ │ │ │ │ │ call print/1
         \\│ │ │ │ │ │ │ not_expr
-        \\│ │ │ │ │ │ │ │ const_int 0
+        \\│ │ │ │ │ │ │ │ const_num 0
         \\│ │ │ │ else
         \\│ │ │ │ block
         \\│ │ │ │ │ set_var g
         \\│ │ │ │ │ │ add_expr
         \\│ │ │ │ │ │ │ take_var g
-        \\│ │ │ │ │ │ │ const_int 1
+        \\│ │ │ │ │ │ │ const_num 1
         \\│ │ │ │ │ dec_var s
         \\│ │ │ │ │ │ str_lit "my_str/lit"
         \\block
@@ -280,24 +288,24 @@ test "printAstTree: every construct" {
         \\│ │ │ get_var g
         \\│ dec_var x
         \\│ │ array
-        \\│ │ │ const_int 1
-        \\│ │ │ const_int 2
-        \\│ │ │ const_int 3
+        \\│ │ │ const_num 1
+        \\│ │ │ const_num 2
+        \\│ │ │ const_num 3
         \\│ dec_var y
         \\│ │ get_index
         \\│ │ │ get_var x
-        \\│ │ │ const_int 1
+        \\│ │ │ const_num 1
         \\│ set_var x
         \\│ │ call f/2
         \\│ │ │ get_var y
         \\│ │ │ take_var x
         \\dec_var arr
         \\│ array
-        \\│ │ const_int 1
-        \\│ │ const_int 2
-        \\│ │ const_int 3
+        \\│ │ const_num 1
+        \\│ │ const_num 2
+        \\│ │ const_num 3
         \\set_index
-        \\│ const_int 1
+        \\│ const_num 1
         \\│ str_lit "hello"
         \\for
         \\│ get_var arr
@@ -321,6 +329,14 @@ test "printAstTree: every construct" {
         \\│ │ │ call print/2
         \\│ │ │ │ get_var k
         \\│ │ │ │ get_var v
+        \\dec_var r
+        \\│ or
+        \\│ │ nil
+        \\│ │ str_lit "hello"
+        \\dec_var y
+        \\│ and
+        \\│ │ const_num 1
+        \\│ │ nil
         \\
     ;
 

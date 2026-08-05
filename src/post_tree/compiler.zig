@@ -86,7 +86,7 @@ const Compiler = struct {
                     try c.emit(.not);
                 },
                 .nil => try c.emit(.nil),
-                .const_int => |id| try c.emitPld(.const_int, id),
+                .const_num => |id| try c.emitPld(.const_num, id),
                 .str_lit => |id| try c.emitPld(.str_lit, id),
                 .atom => |id| try c.emitPld(.atom, id),
                 .arr_lit => |elem_cnt| try c.emitPld(.arr_lit, elem_cnt),
