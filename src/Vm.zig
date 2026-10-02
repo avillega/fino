@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Interner = @import("Interner.zig");
 const builtins = @import("builtins.zig");
@@ -19,7 +18,6 @@ pub const IterPayload = packed struct(u24) {
 
 pub const FnInfo = struct {
     name_id: u24,
-    max_reg: u8,
     arity: ?u8,
     body: union(enum) {
         entry: usize,
@@ -226,75 +224,117 @@ pub const Value = union(enum) {
 const Frame = struct {
     ret_pc: usize,
     saved_frame_base: usize,
-    saved_frame_len: usize,
 };
 
 pub const Inst = packed struct(u32) {
     pub const Op = enum(u8) {
-        lnil,
-        lnum,
-        latm,
-        lstr,
-        copy,
-        move,
+        nil,
+        const_num,
+        atom,
+        str_lit,
+        arr_lit,
+        record_lit,
+        pop,
+        pop_n,
+        neg,
+        not,
         add,
         sub,
         mul,
-        div,
         mod,
-        not,
+        div,
         eql,
-        neq,
-        ltn,
-        leq,
+        lt,
+        gt,
+        print,
+        dec_glob,
+        set_glob,
+        put_glob, // sibling of set_glob to be used when take_glob is used
+        get_glob,
+        take_glob,
+        set_locl,
+        get_locl,
+        take_locl,
+        get_index,
+        set_index,
         jmp,
-        jmf,
-        jmt,
-        getg,
-        setg,
-        takg,
-        putg,
-        arr,
-        rec,
-        geti,
-        seti,
-        call,
-        calln,
-        ret,
+        jmpf,
+        jmpfk,
+        jmpt,
+        jmptk,
         iter_begin,
-        iter_next1,
-        iter_next2,
-        release,
+        iter_next,
+        ret,
         halt,
-
-        pub fn form(op: Op) Form {
-            switch (op) {
-                .copy, .move, .add, .sub, .mul, .div, .mod, .not, .eql, .neq, .ltn, .leq, .arr, .rec, .geti, .seti, .calln, .ret, .iter_begin, .release, .halt => .abc,
-                .lnil, .lnum, .latm, .lstr, .getg, .setg, .takg, .putg, .call => .abx,
-                .jmp, .jmf, .jmt, .iter_next1, .iter_next2 => .sbx,
-            }
-        }
-    };
-
-    pub const Form = enum { abc, abx, sbx };
-    pub const Payload = packed union {
-        abc: packed struct(u24) { a: u8, b: u8, c: u8 },
-        abx: packed struct(u24) { a: u8, b: u16 },
-        sbx: packed struct(u24) { a: u8, sbx: i16 },
+        call,
+        call_native,
     };
 
     op: Op,
-    pld: Payload,
+    pld: u24 = undefined,
 
-    pub fn make(comptime op: Op, args: @FieldType(Payload, @tagName(op.form()))) Inst {
-        return .{ .op = op, .pld = args };
+    pub fn debugPrint(
+        i: @This(),
+        w: *std.Io.Writer,
+        vm: Vm,
+    ) std.Io.Writer.Error!void {
+        switch (i.op) {
+            .const_num => try w.print("{t} {d}", .{ i.op, vm.interner.consts.items[i.pld] }),
+            .str_lit => try w.print("{t} \"{s}\"", .{ i.op, vm.interner.strings.items[i.pld] }),
+            .atom => try w.print("{t} :{s}", .{ i.op, vm.interner.strings.items[i.pld] }),
+            .dec_glob => try w.print("{t} {s}", .{ i.op, vm.interner.strings.items[i.pld] }),
+            .set_glob,
+            .put_glob,
+            .get_glob,
+            .take_glob,
+            => try w.print("{t} {f}", .{ i.op, vm.globals.get(i.pld).?.fmt(vm.interner) }),
+            .set_locl,
+            .get_locl,
+            .take_locl,
+            .arr_lit,
+            .record_lit,
+            .pop_n,
+            .jmp,
+            .jmpf,
+            .jmpt,
+            .call,
+            => try w.print("{t} {d}", .{ i.op, i.pld }),
+            .call_native => {
+                const p: CallPayload = @bitCast(i.pld);
+                try w.print("{t} {d}/{d}", .{ i.op, p.fn_idx, p.arity });
+            },
+            .iter_next => {
+                const p: IterPayload = @bitCast(i.pld);
+                try w.print("{t} {d}", .{ i.op, p.exit });
+            },
+            else => try w.print("{t}", .{i.op}),
+        }
     }
 
-    pub fn as(inst: Inst, comptime form: Form) @FieldType(Payload, @tagName(form)) {
-        if (comptime (builtin.mode == .Debug or builtin.mode == .ReleaseSafe)) {
-            std.debug.assert(inst.op.form() == form);
+    pub fn format(
+        i: @This(),
+        w: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        switch (i.op) {
+            .const_num,
+            .str_lit,
+            .arr_lit,
+            .pop_n,
+            .dec_glob,
+            .set_glob,
+            .put_glob,
+            .get_glob,
+            .set_locl,
+            .get_locl,
+            .take_locl,
+            .take_glob,
+            .jmp,
+            .jmpf,
+            .jmpt,
+            .call,
+            => try w.print("{t} {d}", .{ i.op, i.pld }),
+            else => try w.print("{t}", .{i.op}),
         }
-        return @field(inst.pld, @tagName(form));
     }
 };
 
@@ -302,7 +342,7 @@ out: *std.Io.Writer,
 gpa: Allocator,
 interner: *const Interner,
 globals: std.array_hash_map.Auto(u24, Value),
-regs: std.ArrayList(Value),
+stack: std.ArrayList(Value),
 err: ?[]const u8,
 
 pub fn init(w: *std.Io.Writer, gpa: Allocator, interner: *const Interner) Vm {
@@ -310,7 +350,7 @@ pub fn init(w: *std.Io.Writer, gpa: Allocator, interner: *const Interner) Vm {
         .out = w,
         .interner = interner,
         .gpa = gpa,
-        .regs = .empty,
+        .stack = .empty,
         .globals = .empty,
         .err = null,
     };
@@ -363,169 +403,270 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
     var call_stack: std.ArrayList(Frame) = .empty;
     defer call_stack.deinit(vm.gpa);
 
-    const Ip = struct {
-        vm: *Vm,
-        pc: usize,
-        _insts: []Inst,
-        inline fn inst(ip: *@This()) Inst {
-            return ip._insts[ip.pc];
+    const next = struct {
+        inline fn op(p: *usize, is: []const Inst) Inst {
+            p.* += 1;
+            return is[p.*];
         }
-        inline fn next(ip: *@This()) Inst {
-            ip.pc += 1;
-            return vm.trace(ip._insts[ip.pc], ip.pc);
-        }
-        inline fn goto(ip: *@This(), sbx: i16) Inst {
-            ip.pc += sbx;
-            return vm.trace(ip._insts[ip.pc], ip.pc);
-        }
-    };
+    }.op;
 
+    var pc: usize = start;
     var frame_base: usize = 0;
-    var r: []Value = &.{};
-    const ip: Ip = .{ .vm = vm, .pc = start, ._insts = insts };
 
-    loop: switch (vm.trace(ip.inst(), start)) {
-        .lnil => {
-            const p = ip.inst().as(.abc);
-            vm.store(p.a, .nil);
-            continue :loop ip.next();
+    loop: switch (vm.trace(insts[pc], pc)) {
+        .nil => {
+            try vm.stack.append(vm.gpa, .nil);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .lnum => {
-            const p = ip.inst().as(.abx);
-            vm.store(p.a, vm.interner.consts.items[p.b]);
-            continue :loop ip.next();
+        .const_num => {
+            const v = vm.interner.consts.items[insts[pc].pld];
+            try vm.stack.append(vm.gpa, .{ .number = v });
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .latm => {
-            const p = ip.inst().as(.abx);
-            vm.store(p.a, .{ .atom = p.b });
-            continue :loop ip.next();
+        .atom => {
+            try vm.stack.append(vm.gpa, .{ .atom = insts[pc].pld });
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .lstr => {
-            const p = ip.inst().as(.abx);
-            const s = vm.interner.strings.items[p.b];
+        .str_lit => {
+            const s = vm.interner.strings.items[insts[pc].pld];
             const str = try vm.gpa.create(StrObj);
             str.* = .{
                 .rc = 1,
                 .buffer = try vm.gpa.dupe(u8, s),
             };
-            vm.store(p.a, .{ .str = str });
-            continue :loop ip.next();
+            try vm.stack.append(vm.gpa, .{ .str = str });
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .arr => {
-            const p = ip.inst().as(.abc);
-            const src_e = r[p.b..][0..p.c];
+        .arr_lit => {
+            const n = insts[pc].pld;
+            const src_e = vm.stack.items[vm.stack.items.len - n ..];
             const elems = try vm.gpa.dupe(Value, src_e);
-            @memset(src_e, .nil);
+            vm.stack.shrinkRetainingCapacity(vm.stack.items.len - n);
             const arr = try vm.gpa.create(ArrayObj);
-            arr.* = ArrayObj{
-                .rc = 1,
-                .elems = .fromOwnedSlice(elems),
-            };
-            vm.store(p.a, arr);
-            continue :loop ip.next();
+            arr.* = ArrayObj{ .rc = 1, .elems = .fromOwnedSlice(elems) };
+            try vm.stack.append(vm.gpa, .{ .arr = arr });
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .rec => {
-            const p = ip.inst().as(.abc);
-            const src_e = r[p.b..][0..(2 * p.c)];
+        .record_lit => {
+            const pairs = insts[pc].pld;
+            const src_e = vm.stack.items[vm.stack.items.len - (2 * pairs) ..];
 
             const rec = try vm.gpa.create(RecordObj);
             rec.* = RecordObj{ .rc = 1, .map = .empty };
-            try rec.map.ensureTotalCapacity(vm.gpa, p.c);
-            for (0..p.c) |i| {
+            try rec.map.ensureTotalCapacity(vm.gpa, pairs);
+            for (0..pairs) |i| {
                 const ki = i * 2;
                 const vi = (i * 2) + 1;
                 const k = src_e[ki];
                 std.debug.assert(k == .atom);
                 rec.map.putAssumeCapacity(k.atom, src_e[vi]);
-                src_e[ki] = .nil;
-                src_e[vi] = .nil;
             }
-            try vm.store(p.a, .{ .rec = rec });
-            continue :loop ip.next();
+            vm.stack.shrinkRetainingCapacity(vm.stack.items.len - (2 * pairs));
+            try vm.stack.append(vm.gpa, .{ .rec = rec });
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         inline .neg, .not => |op| {
-            try vm.unop(op, r);
-            continue :loop ip.next();
+            try vm.unop(op);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         inline .add, .sub, .mul, .div, .mod, .eql, .lt, .gt => |op| {
-            try vm.binop(op, r);
-            continue :loop ip.next();
+            try vm.binop(op);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .geti => {
+        .dec_glob => {
+            const id = insts[pc].pld;
+            if (vm.globals.contains(id)) {
+                return vm.fail("global redeclaration {s}", .{vm.nameOf(id)});
+            }
+
+            const val = vm.stack.pop().?;
+            try vm.globals.put(vm.gpa, insts[pc].pld, val);
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .get_glob => {
+            const val = vm.globals.get(insts[pc].pld) orelse return Error.RuntimeError;
+            if (val == .taken) {
+                return vm.fail("global {s} was moved and can not be used", .{vm.nameOf(insts[pc].pld)});
+            }
+            try vm.stack.append(vm.gpa, val.retain());
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .take_glob => {
+            const val = vm.globals.getPtr(insts[pc].pld) orelse return Error.RuntimeError;
+            if (val.* == .taken) {
+                return vm.fail("global {s} was moved and can not be used", .{vm.nameOf(insts[pc].pld)});
+            }
+            try vm.stack.append(vm.gpa, val.*);
+            val.* = .taken;
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .set_glob => {
+            const id = insts[pc].pld;
+            const old = vm.globals.getPtr(id) orelse
+                return vm.fail("global {s} does not exist", .{vm.nameOf(id)});
+
+            if (old.* == .taken) {
+                return vm.fail("attempting to write back to taken global {s}", .{vm.nameOf(id)});
+            }
+
+            old.release(vm.gpa);
+
+            const val = vm.stack.pop().?;
+            old.* = val;
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .put_glob => {
+            const id = insts[pc].pld;
+            const old = vm.globals.getPtr(id) orelse
+                return vm.fail("global {s} does not exist", .{vm.nameOf(id)});
+
+            std.debug.assert(old.* == .taken);
+            const val = vm.stack.pop().?;
+            old.* = val;
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .get_locl => {
+            const v = vm.stack.items[frame_base + insts[pc].pld];
+            std.debug.assert(v != .taken);
+            try vm.stack.append(vm.gpa, v.retain());
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .take_locl => {
+            const v = vm.stack.items[frame_base + insts[pc].pld];
+            std.debug.assert(v != .taken);
+
+            vm.stack.items[frame_base + insts[pc].pld] = .taken;
+            try vm.stack.append(vm.gpa, v);
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .get_index => {
             try vm.getIdx();
-            continue :loop ip.next();
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .seti => {
+        .set_index => {
             try vm.setIdx();
-            continue :loop ip.next();
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .jmp => {
-            const p = ip.inst().as(.sbx);
-            continue :loop ip.goto(p.sbx);
-        },
-        .jmf => {
-            const p = ip.inst().as(.sbx);
-            if (!r[p.a].truthy()) {
-                continue :loop ip.goto(p.sbx);
-            }
-            continue :loop ip.next();
-        },
-        .jmt => {
-            const p = ip.inst().as(.sbx);
-            if (r[p.a].truthy()) {
-                continue :loop ip.goto(p.sbx);
-            }
-            continue :loop ip.next();
-        },
-        .call => {
-            const p = ip.inst().as(.abx);
-            const f = fns[p.bx];
-            try call_stack.append(vm.gpa, .{
-                .saved_frame_base = frame_base,
-                .saved_frame_len = r.len,
-                .ret_pc = ip.pc + 1,
-            });
+        .set_locl => {
+            const curr = vm.stack.items[frame_base + insts[pc].pld];
+            curr.release(vm.gpa);
 
-            frame_base += p.a;
-            const top = frame_base + f.max_reg;
-            if (vm.regs.items.len < top) {
-                vm.regs.appendNTimes(vm.gpa, .nil, top - vm.regs.items.len);
-            }
-            r = vm.regs.items[frame_base..top];
-            ip.pc = f.body.entry;
-            continue :loop vm.trace(ip.inst(), ip.pc);
+            const val = vm.stack.pop().?;
+            vm.stack.items[frame_base + insts[pc].pld] = val;
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .calln => {
-            const p = ip.inst().as(.abc);
-            const f = fns[p.b];
-
-            if (f.arity) |arity| {
-                if (arity != p.c) return error.WrongNumbertOfArgs;
-            }
-            const args = r[p.a..][0..p.c];
-            const res = try f.body.native(vm, args);
-            for (args) |a| a.release(vm.gpa);
-            @memset(args, .nil);
-            vm.store(r, p.a, res);
-            continue :loop ip.next();
+        .print => {
+            const arg = vm.stack.pop().?;
+            defer arg.release(vm.gpa);
+            try vm.out.print("{f}\n", .{arg.fmt(vm.interner)});
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
-        .ret => {
-            const p = ip.inst().as(.abc);
-            const res = r[p.a];
-            r[p.a] = .taken;
-            for (r) |e| {
+        .pop => {
+            const v = vm.stack.pop().?;
+            defer v.release(vm.gpa);
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .pop_n => {
+            const elms = vm.stack.items[vm.stack.items.len - insts[pc].pld ..];
+            for (elms) |e| {
                 e.release(vm.gpa);
             }
-            @memset(r, .nil);
-            vm.store(r, 0, res);
+            vm.stack.shrinkRetainingCapacity(vm.stack.items.len - insts[pc].pld);
+            continue :loop vm.trace(next(&pc, insts), pc);
+        },
+        .jmp => {
+            const v = insts[pc].pld;
+            pc = v;
+            continue :loop vm.trace(insts[pc], pc);
+        },
+        .jmpf => {
+            const val = vm.stack.pop().?;
+            defer val.release(vm.gpa);
+            const target = insts[pc].pld;
+            pc += 1;
+            if (!val.truthy()) {
+                pc = target;
+            }
+            continue :loop vm.trace(insts[pc], pc);
+        },
+        .jmpfk => {
+            const val = vm.stack.getLast();
+            const target = insts[pc].pld;
+            pc += 1;
+            if (!val.truthy()) {
+                pc = target;
+            } else {
+                val.release(vm.gpa);
+                _ = vm.stack.pop().?;
+            }
+            continue :loop vm.trace(insts[pc], pc);
+        },
+        .jmpt => {
+            const val = vm.stack.pop().?;
+            defer val.release(vm.gpa);
+            const target = insts[pc].pld;
+            pc += 1;
+            if (val.truthy()) {
+                pc = target;
+            }
+            continue :loop vm.trace(insts[pc], pc);
+        },
+        .jmptk => {
+            const val = vm.stack.getLast();
+            const target = insts[pc].pld;
+            pc += 1;
+            if (val.truthy()) {
+                pc = target;
+            } else {
+                val.release(vm.gpa);
+                _ = vm.stack.pop().?;
+            }
+            continue :loop vm.trace(insts[pc], pc);
+        },
+        .ret => {
+            const res = vm.stack.pop().?;
+            const elms = vm.stack.items[frame_base..];
+            for (elms) |e| {
+                e.release(vm.gpa);
+            }
+            vm.stack.shrinkRetainingCapacity(frame_base);
+            try vm.stack.append(vm.gpa, res);
+
             const frame = call_stack.pop().?;
             frame_base = frame.saved_frame_base;
-            r = vm.regs.items[frame_base..][0..frame.saved_frame_len];
-            ip.pc = frame.ret_pc;
-            continue :loop vm.trace(ip.inst(), ip.pc);
+            pc = frame.ret_pc;
+            continue :loop vm.trace(insts[pc], pc);
+        },
+        .call => {
+            const fn_idx = insts[pc].pld;
+            const f = fns[fn_idx];
+            try call_stack.append(vm.gpa, .{
+                .saved_frame_base = frame_base,
+                .ret_pc = pc + 1,
+            });
+
+            frame_base = vm.stack.items.len - f.arity.?;
+            pc = f.body.entry;
+            continue :loop vm.trace(insts[pc], pc);
+        },
+        .call_native => {
+            const p: CallPayload = @bitCast(insts[pc].pld);
+            const args = vm.stack.items[vm.stack.items.len - p.arity ..];
+            const f = fns[p.fn_idx];
+
+            if (f.arity) |arity| {
+                if (arity != p.arity) return error.WrongNumbertOfArgs;
+            }
+            const r = try f.body.native(vm, args);
+            for (args) |a| {
+                a.release(vm.gpa);
+            }
+            vm.stack.shrinkRetainingCapacity(vm.stack.items.len - p.arity);
+            try vm.stack.append(vm.gpa, r);
+            continue :loop vm.trace(next(&pc, insts), pc);
         },
         .iter_begin => {
-            const p = ip.inst().as(.abc);
+            const n = insts[pc].pld;
             const it = vm.stack.items[vm.stack.items.len - 1];
             switch (it) {
                 .arr, .rec => {},
@@ -585,16 +726,13 @@ pub fn interpret(vm: *Vm, start: usize, insts: []Inst, fns: []FnInfo) !void {
     }
 }
 
-// owns v, releases previous value in r[reg]
-inline fn store(vm: *Vm, r: []Value, reg: u8, v: Value) void {
-    r[reg].release(vm.gpa);
-    r[reg] = v;
-}
-
-inline fn getIdx(vm: *Vm, inst: Inst, r: []Value) !void {
-    const p = inst.as(.abc);
-    const target = r[p.b];
-    const idx = r[p.c];
+inline fn getIdx(vm: *Vm) !void {
+    const idx = vm.stack.pop().?;
+    const target = vm.stack.pop().?;
+    defer {
+        idx.release(vm.gpa);
+        target.release(vm.gpa);
+    }
 
     switch (target) {
         .str => return error.Nyi, // TODO: support chars/bytes?
@@ -602,44 +740,51 @@ inline fn getIdx(vm: *Vm, inst: Inst, r: []Value) !void {
             if (idx != .number) return error.IdxMustBeInt;
             const i = try floatToIdx(idx.number);
             if (i < 0 or i >= a.elems.items.len) return error.IndexOutOfBounds;
-            vm.store(p.a, a.elems.items[@intCast(i)].retain());
+
+            try vm.stack.append(vm.gpa, a.elems.items[@intCast(i)].retain());
         },
-        .rec => |rec| {
+        .rec => |r| {
             if (idx != .atom) return error.IdxMustBeAtom;
-            const v: Value = rec.map.get(idx.atom) orelse .nil;
-            vm.store(p.a, v.retain());
+            const v: Value = r.map.get(idx.atom) orelse .nil;
+            try vm.stack.append(vm.gpa, v.retain());
         },
         else => return error.TargetMustBeIndexable,
     }
 }
 
-inline fn setIdx(vm: *Vm, inst: Inst, r: []Value) !void {
-    const p = inst.as(.abc);
-    const target = r[p.a];
-    const idx = r[p.b];
-    const val = r[p.c];
+inline fn setIdx(vm: *Vm) !void {
+    const target = vm.stack.pop().?;
+    const val = vm.stack.pop().?;
+    const idx = vm.stack.pop().?;
+    defer {
+        idx.release(vm.gpa);
+    }
+    errdefer {
+        target.release(vm.gpa);
+        val.release(vm.gpa);
+    }
 
     switch (target) {
         .arr => |a| {
             if (idx != .number) return error.IdxMustBeInt;
             const i = try floatToIdx(idx.number);
             if (i < 0 or i >= a.elems.items.len) return error.IndexOutOfBounds;
-            const x = try a.ensureUnique(vm.gpa);
 
+            const x = try a.ensureUnique(vm.gpa);
             x.elems.items[i].release(vm.gpa);
-            x.elems.items[i] = val.retain();
-            vm.store(p.a, .{ .arr = x });
+            x.elems.items[i] = val;
+            try vm.stack.append(vm.gpa, .{ .arr = x });
         },
-        .rec => |rec| {
+        .rec => |r| {
             if (idx != .atom) return error.IdxMustBeAtom;
-            const x = try rec.ensureUnique(vm.gpa);
+            const x = try r.ensureUnique(vm.gpa);
 
             const gop = try x.map.getOrPut(vm.gpa, idx.atom);
             if (gop.found_existing) {
                 gop.value_ptr.*.release(vm.gpa);
             }
-            gop.value_ptr.* = val.retain();
-            vm.store(p.a, .{ .rec = x });
+            gop.value_ptr.* = val;
+            try vm.stack.append(vm.gpa, .{ .rec = x });
         },
         else => return error.TargetMustBeIndexable,
     }
